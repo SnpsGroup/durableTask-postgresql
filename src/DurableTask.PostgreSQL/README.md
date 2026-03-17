@@ -185,7 +185,7 @@ SELECT * FROM dt.lock_next_orchestration(10, 'test-worker', NOW() + INTERVAL '5 
 ```
 
 ### Integration Tests
-See: `tests/Janus.Infrastructure.Tests/Workflows/DurableTask.PostgreSQL/`
+See: `tests/DurableTask.PostgreSQL.Tests/`
 (To be created)
 
 ## Performance Considerations
@@ -208,7 +208,7 @@ Recommended: 5 minutes for orchestrations, 2 minutes for tasks
 ## Conversion Notes
 
 ### From SQL Server
-Key differences documented in [`conductor/durabletask-postgresql-conversion.md`](../../../../conductor/durabletask-postgresql-conversion.md):
+Key differences compared to the SQL Server provider:
 
 | SQL Server | PostgreSQL |
 |------------|------------|
@@ -245,9 +245,7 @@ Key differences documented in [`conductor/durabletask-postgresql-conversion.md`]
 
 ## Contributing
 
-This project is part of Janus SGA and will be open-sourced as a standalone package.
-
-See conversion plan: [`conductor/durabletask-postgresql-conversion.md`](../../../../conductor/durabletask-postgresql-conversion.md)
+This project is an open-source PostgreSQL provider for the Durable Task Framework.
 
 ## References
 
