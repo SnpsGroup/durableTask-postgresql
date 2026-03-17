@@ -1,0 +1,36 @@
+name: Publish to NuGet (Trusted Publishing)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore src/DurableTask.PostgreSQL/DurableTask.PostgreSQL.csproj
+
+    - name: Build project
+      run: dotnet build src/DurableTask.PostgreSQL/DurableTask.PostgreSQL.csproj --configuration Release --no-restore
+
+    - name: Pack NuGet package
+      run: |
+        dotnet pack src/DurableTask.PostgreSQL/DurableTask.PostgreSQL.csproj --configuration Release --no-build --output ./out
+
+    - name: Push to NuGet.org
+      run: dotnet nuget push ./out/*.nupkg --source https://api.nuget.org/v3/index.json
