@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>13.0</LangVersion>
+
+    <!-- NuGet Package Metadata -->
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageId>DurableTask.PostgreSQL</PackageId>
+    <Version>1.0.0-alpha</Version>
+    <Authors>SnpsGroup Engineering</Authors>
+    <Company>SnpsGroup</Company>
+    <Description>PostgreSQL backend for Microsoft Durable Task Framework (DTFx)</Description>
+    <PackageTags>durabletask;postgresql;workflow;orchestration</PackageTags>
+    <RepositoryUrl>https://github.com/SnpsGroup/DurableTask.PostgreSQL</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Local NuGet Package Output -->
+    <LocalNuGetPath Condition="'$(LocalNuGetPath)'==''"></LocalNuGetPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Azure.DurableTask.Core" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="Scripts\**\*.sql" Pack="true" PackagePath="contentFiles\any\any\Scripts" />
+    <Content Include="Scripts\**\*.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Custom target to publish to local NuGet feed after pack -->
+  <Target Name="PublishToLocalNuGet" AfterTargets="Pack" Condition="'$(GeneratePackageOnBuild)' == 'true' and '$(LocalNuGetPath)' != ''">
+    <PropertyGroup>
+      <PackageFileName>$(PackageId).$(PackageVersion).nupkg</PackageFileName>
+      <PackageSourcePath>$(PackageOutputPath)$(PackageFileName)</PackageSourcePath>
+      <PackageDestPath>$(LocalNuGetPath)\$(PackageFileName)</PackageDestPath>
+    </PropertyGroup>
+
+    <!-- Create directory if it doesn't exist -->
+    <MakeDir Directories="$(LocalNuGetPath)" Condition="!Exists('$(LocalNuGetPath)')" />
+
+    <!-- Copy package to local feed -->
+    <Copy SourceFiles="$(PackageSourcePath)" DestinationFiles="$(PackageDestPath)" SkipUnchangedFiles="false" />
+
+    <Message Text="📦 Package published to local NuGet feed: $(PackageDestPath)" Importance="high" />
+  </Target>
+
+</Project>

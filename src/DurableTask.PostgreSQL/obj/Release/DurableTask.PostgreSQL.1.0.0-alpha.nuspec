@@ -1,0 +1,41 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+  <metadata>
+    <id>DurableTask.PostgreSQL</id>
+    <version>1.0.0-alpha</version>
+    <authors>SnpsGroup Engineering</authors>
+    <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
+    <readme>README.md</readme>
+    <description>PostgreSQL backend for Microsoft Durable Task Framework (DTFx)</description>
+    <copyright>Copyright © 2026 SNP SGroup</copyright>
+    <tags>durabletask postgresql workflow orchestration</tags>
+    <repository type="git" url="https://github.com/SnpsGroup/DurableTask.PostgreSQL" />
+    <dependencies>
+      <group targetFramework="net10.0">
+        <dependency id="Microsoft.Azure.DurableTask.Core" version="2.16.2" exclude="Build,Analyzers" />
+        <dependency id="Microsoft.Extensions.Configuration.Abstractions" version="10.0.1" exclude="Build,Analyzers" />
+        <dependency id="Microsoft.Extensions.DependencyInjection.Abstractions" version="10.0.1" exclude="Build,Analyzers" />
+        <dependency id="Microsoft.Extensions.Logging.Abstractions" version="10.0.1" exclude="Build,Analyzers" />
+        <dependency id="Npgsql" version="9.0.2" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+    <contentFiles>
+      <files include="any/net10.0/Scripts/logic.postgresql.sql" buildAction="Content" />
+      <files include="any/any/Scripts/logic.postgresql.sql" buildAction="None" />
+      <files include="any/net10.0/Scripts/schema.postgresql.sql" buildAction="Content" />
+      <files include="any/any/Scripts/schema.postgresql.sql" buildAction="None" />
+    </contentFiles>
+  </metadata>
+  <files>
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\bin\Release\net10.0\DurableTask.PostgreSQL.dll" target="lib\net10.0\DurableTask.PostgreSQL.dll" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\bin\Release\net10.0\DurableTask.PostgreSQL.xml" target="lib\net10.0\DurableTask.PostgreSQL.xml" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\Scripts\logic.postgresql.sql" target="content\Scripts\logic.postgresql.sql" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\Scripts\logic.postgresql.sql" target="contentFiles\any\net10.0\Scripts\logic.postgresql.sql" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\Scripts\logic.postgresql.sql" target="contentFiles\any\any\Scripts\logic.postgresql.sql" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\Scripts\schema.postgresql.sql" target="content\Scripts\schema.postgresql.sql" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\Scripts\schema.postgresql.sql" target="contentFiles\any\net10.0\Scripts\schema.postgresql.sql" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\Scripts\schema.postgresql.sql" target="contentFiles\any\any\Scripts\schema.postgresql.sql" />
+    <file src="D:\Code\Janus\_DurableTask_OSS\src\DurableTask.PostgreSQL\README.md" target="\README.md" />
+  </files>
+</package>

@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "dgSpecHash": "hwak+uEqrqg=",
+  "success": true,
+  "projectFilePath": "D:\\Code\\Janus\\_DurableTask_OSS\\src\\DurableTask.PostgreSQL\\DurableTask.PostgreSQL.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\luisg\\.nuget\\packages\\castle.core\\5.0.0\\castle.core.5.0.0.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\microsoft.azure.durabletask.core\\2.16.2\\microsoft.azure.durabletask.core.2.16.2.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\microsoft.extensions.configuration.abstractions\\10.0.1\\microsoft.extensions.configuration.abstractions.10.0.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\10.0.1\\microsoft.extensions.dependencyinjection.abstractions.10.0.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\10.0.1\\microsoft.extensions.logging.abstractions.10.0.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\microsoft.extensions.primitives\\10.0.1\\microsoft.extensions.primitives.10.0.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\newtonsoft.json\\13.0.1\\newtonsoft.json.13.0.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\npgsql\\9.0.2\\npgsql.9.0.2.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.diagnostics.eventlog\\6.0.0\\system.diagnostics.eventlog.6.0.0.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.reactive\\4.4.1\\system.reactive.4.4.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.reactive.compatibility\\4.4.1\\system.reactive.compatibility.4.4.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.reactive.core\\4.4.1\\system.reactive.core.4.4.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.reactive.interfaces\\4.4.1\\system.reactive.interfaces.4.4.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.reactive.linq\\4.4.1\\system.reactive.linq.4.4.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.reactive.platformservices\\4.4.1\\system.reactive.platformservices.4.4.1.nupkg.sha512",
+    "C:\\Users\\luisg\\.nuget\\packages\\system.reactive.providers\\4.4.1\\system.reactive.providers.4.4.1.nupkg.sha512"
+  ],
+  "logs": []
+}
