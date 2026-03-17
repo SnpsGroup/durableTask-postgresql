@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DurableTask.PostgreSQL/DurableTask.PostgreSQL.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DurableTask.PostgreSQL.Tests/DurableTask.PostgreSQL.Tests.csproj" />
+  </Folder>
+</Solution>
