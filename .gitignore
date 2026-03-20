@@ -1,0 +1,29 @@
+# Build artifacts
+[Bb]in/
+[Oo]bj/
+
+# User-specific files
+*.user
+*.rsuser
+*.suo
+*.userprefs
+
+# IDE/editor folders
+.vs/
+.vscode/
+.idea/
+
+# NuGet artifacts
+*.nupkg
+*.snupkg
+packages/
+
+# Test artifacts
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# Local tool metadata
+.aidex/
+.serena/
