@@ -102,14 +102,24 @@ dotnet run --project samples/ConsumerApp/ConsumerApp.csproj
 
 ## Releases
 
-NuGet publishing is automated by GitHub Actions when a `v*` tag is pushed:
+NuGet publishing is automated by GitHub Actions in
+`.github/workflows/publish-nuget.yml`.
 
-`.github/workflows/publish-nuget.yml`
+Triggers:
+- Pull Request and Push (main/vnext/desenv): build + pack validation
+- Tag push `v*`: build + publish to NuGet.org
+- Manual (`workflow_dispatch`): optional publish when `publish=true`
+
+For trusted publishing, configure:
+- NuGet.org trusted publisher for this GitHub repository/workflow
+- GitHub secret `NUGET_ORG_USERNAME` with the owner username at NuGet.org
 
 ## Contributing
 
 Contributions are welcome. Open an issue to discuss proposals and behavior
 changes before large PRs.
+
+Please review [Code of Conduct](CODE_OF_CONDUCT.md) before contributing.
 
 ## License
 
