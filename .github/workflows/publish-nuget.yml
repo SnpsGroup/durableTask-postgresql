@@ -61,7 +61,6 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    environment: release
     steps:
       - name: Download package artifacts
         uses: actions/download-artifact@v4
