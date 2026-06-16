@@ -55,8 +55,10 @@
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
-    <None Include="Scripts\**\*.sql" Pack="true" PackagePath="contentFiles\any\any\Scripts" />
-    <Content Include="Scripts\**\*.sql" CopyToOutputDirectory="PreserveNewest" />
+    <!-- SQL scripts are embedded as resources (mirrors DurableTask.SqlServer),
+         so build and publish produce identical artifacts and the runtime reads
+         them from the assembly rather than the output directory. -->
+    <EmbeddedResource Include="Scripts\*.sql" />
   </ItemGroup>
 
   <!-- Custom target to publish to local NuGet feed after pack -->

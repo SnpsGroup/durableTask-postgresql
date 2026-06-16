@@ -7,6 +7,7 @@ using DurableTask.Core.History;
 using DurableTask.Core.Query;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using System.Reflection;
 using System.Text.Json;
 
 namespace DurableTask.PostgreSQL;
@@ -1174,29 +1175,27 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             : $"{traceContext.TraceParent}\n{traceContext.TraceState}";
     }
 
+    private static async Task<string> GetEmbeddedScriptAsync(string scriptName)
+    {
+        Assembly assembly = typeof(PostgreSqlOrchestrationService).Assembly;
+        string resourceName = $"{assembly.GetName().Name}.Scripts.{scriptName}";
+
+        using Stream? resourceStream = assembly.GetManifestResourceStream(resourceName);
+        if (resourceStream == null)
+        {
+            throw new ArgumentException($"Could not find assembly resource named '{resourceName}'.");
+        }
+
+        using var reader = new StreamReader(resourceStream);
+        return await reader.ReadToEndAsync().ConfigureAwait(false);
+    }
+
     private async Task DeploySchemaAsync()
     {
-        var baseDir = AppContext.BaseDirectory;
-        
-        var schemaPath = Path.Combine(baseDir, "Scripts", "schema.postgresql.sql");
-        var logicPath = Path.Combine(baseDir, "Scripts", "logic.postgresql.sql");
-
-        if (!File.Exists(schemaPath))
-        {
-            schemaPath = Path.Combine(baseDir, "DurableTask.PostgreSQL", "Scripts", "schema.postgresql.sql");
-        }
-        if (!File.Exists(logicPath))
-        {
-            logicPath = Path.Combine(baseDir, "DurableTask.PostgreSQL", "Scripts", "logic.postgresql.sql");
-        }
-
-        if (!File.Exists(schemaPath) || !File.Exists(logicPath))
-        {
-            throw new FileNotFoundException($"Schema scripts not found. Searched in: {baseDir}");
-        }
-
-        var schemaSql = await File.ReadAllTextAsync(schemaPath).ConfigureAwait(false);
-        var logicSql = await File.ReadAllTextAsync(logicPath).ConfigureAwait(false);
+        // SQL scripts are embedded as assembly resources (mirrors DurableTask.SqlServer),
+        // so they are always available regardless of build or publish output.
+        var schemaSql = await GetEmbeddedScriptAsync("schema.postgresql.sql").ConfigureAwait(false);
+        var logicSql = await GetEmbeddedScriptAsync("logic.postgresql.sql").ConfigureAwait(false);
 
         // Deploy via a raw NpgsqlConnection instead of the pooled _dataSource.
         // The _dataSource has composite type mappings registered; its type cache is
