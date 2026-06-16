@@ -11,6 +11,28 @@
 -- CORE LIFECYCLE OPERATIONS
 -- =============================================================================
 
+-- Idempotent deployment: drop all functions up-front so that CREATE OR REPLACE
+-- below can change a function's signature or RETURN type without failing with
+-- SQLSTATE 42P13 ("cannot change return type of existing function"). Tables and
+-- data are preserved; only routines are recreated. CASCADE also drops any
+-- dependent objects (e.g. comments), which are re-added below.
+DROP FUNCTION IF EXISTS dt.create_instance CASCADE;
+DROP FUNCTION IF EXISTS dt.lock_next_orchestration CASCADE;
+DROP FUNCTION IF EXISTS dt.lock_next_task CASCADE;
+DROP FUNCTION IF EXISTS dt.query_single_orchestration CASCADE;
+DROP FUNCTION IF EXISTS dt.renew_orchestration_locks CASCADE;
+DROP FUNCTION IF EXISTS dt.renew_task_locks CASCADE;
+DROP FUNCTION IF EXISTS dt.complete_tasks CASCADE;
+DROP FUNCTION IF EXISTS dt.checkpoint_orchestration CASCADE;
+DROP FUNCTION IF EXISTS dt.add_orchestration_event CASCADE;
+DROP FUNCTION IF EXISTS dt.terminate_instance CASCADE;
+DROP FUNCTION IF EXISTS dt.get_instance_history CASCADE;
+DROP FUNCTION IF EXISTS dt.purge_instance_state_by_time CASCADE;
+DROP FUNCTION IF EXISTS dt.purge_instance_state_by_id CASCADE;
+DROP FUNCTION IF EXISTS dt.query_many_orchestrations CASCADE;
+DROP FUNCTION IF EXISTS dt.rewind_instance CASCADE;
+DROP FUNCTION IF EXISTS dt.get_scale_recommendation CASCADE;
+
 -- Function: dt.create_instance
 -- Purpose: Create new orchestration instance with deduplication support
 -- Parameters:
@@ -443,6 +465,7 @@ RETURNS TABLE (
     input_text JSONB,
     output_text JSONB,
     custom_status_text JSONB,
+    parent_instance_id VARCHAR(100),
     trace_context VARCHAR(800)
 )
 LANGUAGE plpgsql
@@ -466,6 +489,7 @@ BEGIN
         p_input.text AS input_text,
         p_output.text AS output_text,
         p_custom.text AS custom_status_text,
+        i.parent_instance_id,
         i.trace_context
     FROM dt.instances i
     LEFT JOIN dt.payloads p_input ON
@@ -600,15 +624,20 @@ BEGIN
     v_task_hub := dt.current_task_hub();
     v_expected_count := array_length(p_completed_sequence_numbers, 1);
 
-    -- Ensure instance exists and is running before handling task results
-    -- Hold lock to avoid race conditions
-    SELECT DISTINCT r.instance_id INTO v_existing_instance_id
-    FROM unnest(p_results) AS r
-    INNER JOIN dt.instances i ON
-        i.task_hub = v_task_hub AND
-        i.instance_id = r.instance_id AND
-        i.execution_id = r.execution_id AND
-        i.runtime_status IN ('Running', 'Suspended')
+    -- Ensure an instance exists and is running before handling task results.
+    -- Hold a lock on the instance row to avoid race conditions. PostgreSQL forbids
+    -- FOR UPDATE together with DISTINCT/GROUP BY, so we lock a single matching
+    -- instance row directly.
+    SELECT i.instance_id INTO v_existing_instance_id
+    FROM dt.instances i
+    WHERE i.task_hub = v_task_hub
+      AND i.runtime_status IN ('Running', 'Suspended')
+      AND EXISTS (
+          SELECT 1 FROM unnest(p_results) AS r
+          WHERE r.instance_id = i.instance_id
+            AND r.execution_id = i.execution_id
+      )
+    LIMIT 1
     FOR UPDATE OF i;
 
     -- If instance found, save results to new_events

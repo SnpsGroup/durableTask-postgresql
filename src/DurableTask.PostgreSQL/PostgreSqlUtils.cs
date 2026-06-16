@@ -287,14 +287,12 @@ static class PostgreSqlUtils
     {
         if (reader.TryGetProperty("payloadText", out var payloadElement) && payloadElement.ValueKind != JsonValueKind.Null)
         {
-            if (payloadElement.ValueKind == JsonValueKind.String)
-            {
-                return payloadElement.GetString();
-            }
-            else if (payloadElement.ValueKind != JsonValueKind.Null)
-            {
-                return payloadElement.GetRawText();
-            }
+            // Return the raw JSON text so the value stays in its serialized form.
+            // The runtime expects payloads (e.g. ExecutionStartedEvent.Input) to be
+            // JSON it can deserialize into the typed input; calling GetString() here
+            // would unwrap string values and break round-tripping (e.g. "World" would
+            // lose its quotes and fail to deserialize back into a string).
+            return payloadElement.GetRawText();
         }
         return null;
     }

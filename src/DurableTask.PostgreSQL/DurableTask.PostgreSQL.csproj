@@ -9,7 +9,7 @@
     <!-- NuGet Package Metadata -->
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>DurableTask.PostgreSQL</PackageId>
-    <Version>1.0.0-alpha.1</Version>
+    <Version>1.0.0-alpha.2</Version>
     <Authors>SnpsGroup Engineering</Authors>
     <Company>SnpsGroup</Company>
     <Description>PostgreSQL backend for Microsoft Durable Task Framework (DTFx)</Description>

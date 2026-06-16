@@ -29,8 +29,34 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
-        // Create data source (connection pool)
-        _dataSource = NpgsqlDataSource.Create(_settings.ConnectionString);
+        // Propagate TaskHubName to PostgreSQL by setting it as the connection's
+        // ApplicationName. The schema's current_task_hub() uses application_name
+        // when TaskHubMode = '0' (the default), so this makes TaskHubName govern
+        // the task hub. When TaskHubName is null/empty we leave the connection
+        // string untouched (falls back to CURRENT_USER per TaskHubMode = '1').
+        var connectionBuilder = new NpgsqlConnectionStringBuilder(_settings.ConnectionString);
+        if (!string.IsNullOrEmpty(_settings.TaskHubName))
+        {
+            connectionBuilder.ApplicationName = _settings.TaskHubName;
+        }
+
+        // Build the data source via NpgsqlDataSourceBuilder so we can register
+        // composite type mappings. checkpoint_orchestration and complete_tasks
+        // take arrays of PostgreSQL composite types (dt.history_event[],
+        // dt.task_event[], etc.); the records in PostgreSqlTypes.cs map to them
+        // 1:1 and are sent as typed arrays instead of JSON strings.
+        var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionBuilder.ConnectionString);
+        // Map the PostgreSQL composite types used by checkpoint_orchestration and
+        // complete_tasks. Npgsql resolves each composite's OID on the data source's
+        // first connection, so the dt.* types must already exist by then —
+        // DeploySchemaAsync uses a raw NpgsqlConnection (not this data source) to
+        // avoid populating the type cache before the schema is in place.
+        dataSourceBuilder.MapComposite<PostgreSqlTypes.MessageId>($"{_settings.SchemaName}.message_id");
+        dataSourceBuilder.MapComposite<PostgreSqlTypes.HistoryEvent>($"{_settings.SchemaName}.history_event");
+        dataSourceBuilder.MapComposite<PostgreSqlTypes.OrchestrationEvent>($"{_settings.SchemaName}.orchestration_event");
+        dataSourceBuilder.MapComposite<PostgreSqlTypes.TaskEvent>($"{_settings.SchemaName}.task_event");
+        dataSourceBuilder.MapComposite<PostgreSqlTypes.TaskResult>($"{_settings.SchemaName}.task_result");
+        _dataSource = dataSourceBuilder.Build();
 
         _logger.LogInformation(
             "PostgreSqlOrchestrationService initialized with TaskHub={TaskHub}, WorkerId={WorkerId}",
@@ -266,11 +292,11 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             var dequeueCount = reader.GetInt32(reader.GetOrdinal("dequeue_count"));
             var version = reader.IsDBNull(reader.GetOrdinal("version")) ? null : reader.GetString(reader.GetOrdinal("version"));
 
-            JsonElement? payloadText = null;
-            if (!reader.IsDBNull(reader.GetOrdinal("payload_text")))
-            {
-                payloadText = (JsonElement)reader.GetValue(reader.GetOrdinal("payload_text"));
-            }
+            // payload_text is a JSONB column; Npgsql returns it as a string holding
+            // the raw JSON (e.g. "\"World\""). Use it directly as the serialized input.
+            string? payloadText = reader.IsDBNull(reader.GetOrdinal("payload_text"))
+                ? null
+                : reader.GetString(reader.GetOrdinal("payload_text"));
 
             _logger.LogDebug(
                 "Locked task {SequenceNumber} for instance {InstanceId} (TaskId={TaskId})",
@@ -281,7 +307,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             {
                 Name = name,
                 Version = version,
-                Input = payloadText?.GetRawText(),
+                Input = payloadText,
             };
 
             var taskMessage = new TaskMessage
@@ -327,66 +353,36 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             "Checkpointing orchestration {InstanceId}, status={Status}, newEvents={EventCount}",
             workItem.InstanceId, orchestrationState.OrchestrationStatus, newOrchestrationRuntimeState.NewEvents?.Count ?? 0);
 
-        await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.checkpoint_orchestration($1, $2, $3, $4, $5, $6, $7, $8)", connection);
-
         var instance = newOrchestrationRuntimeState.OrchestrationInstance!;
         var newEvents = newOrchestrationRuntimeState.NewEvents ?? [];
         var allEvents = newOrchestrationRuntimeState.Events;
         int nextSequenceNumber = allEvents.Count - newEvents.Count;
 
-        cmd.Parameters.AddWithValue(workItem.InstanceId);
-        cmd.Parameters.AddWithValue(instance.ExecutionId ?? (object)DBNull.Value);
-        cmd.Parameters.AddWithValue(orchestrationState.OrchestrationStatus.ToString());
-        
-        // Custom status - serialize to JSON
-        var customStatus = orchestrationState.Status;
-        if (!string.IsNullOrEmpty(customStatus))
-        {
-            cmd.Parameters.AddWithValue(customStatus);
-        }
-        else
-        {
-            cmd.Parameters.AddWithValue(DBNull.Value);
-        }
+        // Build the typed composite arrays that checkpoint_orchestration expects.
+        // These are PostgreSQL composite types (dt.message_id, dt.history_event,
+        // dt.orchestration_event, dt.task_event) mapped via NpgsqlDataSourceBuilder.
+        // Sending JSON strings here fails because PostgreSQL cannot cast text to a
+        // composite array, which was the root cause of the orchestration abandonment.
+        PostgreSqlTypes.MessageId[] deletedEvents = (workItem.NewMessages ?? (IList<TaskMessage>)[])
+            .Select(m => new PostgreSqlTypes.MessageId
+            {
+                InstanceId = m.OrchestrationInstance.InstanceId,
+                SequenceNumber = m.SequenceNumber,
+            })
+            .ToArray();
 
-        // Deleted events (message IDs)
-        var deletedEvents = workItem.NewMessages?.Select(m => 
-            $"(\"{m.OrchestrationInstance.InstanceId}\",{m.SequenceNumber})").ToArray() ?? [];
-        if (deletedEvents.Length > 0)
-        {
-            cmd.Parameters.AddWithValue($"{{{string.Join(",", deletedEvents)}}}");
-        }
-        else
-        {
-            cmd.Parameters.AddWithValue("{}");
-        }
+        PostgreSqlTypes.HistoryEvent[] historyEvents = newEvents
+            .Select((evt, i) => ToHistoryEventRecord(evt, instance, nextSequenceNumber + i))
+            .ToArray();
 
-        // New history events
-        var historyEvents = new List<string>();
-        foreach (var evt in newEvents)
-        {
-            var historyJson = BuildHistoryEventJson(evt, instance, nextSequenceNumber++);
-            historyEvents.Add(historyJson);
-        }
-        if (historyEvents.Count > 0)
-        {
-            cmd.Parameters.AddWithValue($"[{string.Join(",", historyEvents)}]");
-        }
-        else
-        {
-            cmd.Parameters.AddWithValue("[]");
-        }
-
-        // New orchestration events (sub-orchestrations) + timer messages
-        var orchestrationEvents = new List<string>();
+        var orchestrationEvents = new List<PostgreSqlTypes.OrchestrationEvent>();
         if (orchestratorMessages != null)
         {
             foreach (var msg in orchestratorMessages)
             {
                 if (msg.Event is ExecutionStartedEvent)
                 {
-                    orchestrationEvents.Add(BuildOrchestrationEventJson(msg));
+                    orchestrationEvents.Add(ToOrchestrationEventRecord(msg));
                 }
             }
         }
@@ -396,252 +392,290 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             {
                 if (msg.Event is TimerCreatedEvent || msg.Event is TimerFiredEvent)
                 {
-                    orchestrationEvents.Add(BuildOrchestrationEventJson(msg));
+                    orchestrationEvents.Add(ToOrchestrationEventRecord(msg));
                 }
             }
         }
-        if (orchestrationEvents.Count > 0)
-        {
-            cmd.Parameters.AddWithValue($"[{string.Join(",", orchestrationEvents)}]");
-        }
-        else
-        {
-            cmd.Parameters.AddWithValue("[]");
-        }
 
-        // New task events (activity tasks)
-        var taskEvents = new List<string>();
+        var taskEvents = new List<PostgreSqlTypes.TaskEvent>();
         if (outboundMessages != null)
         {
             foreach (var msg in outboundMessages)
             {
                 if (msg.Event is TaskScheduledEvent scheduledEvent)
                 {
-                    taskEvents.Add(BuildTaskEventJson(msg, scheduledEvent));
+                    taskEvents.Add(ToTaskEventRecord(msg, scheduledEvent));
                 }
             }
         }
-        if (taskEvents.Count > 0)
-        {
-            cmd.Parameters.AddWithValue($"[{string.Join(",", taskEvents)}]");
-        }
-        else
-        {
-            cmd.Parameters.AddWithValue("[]");
-        }
 
-        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+        await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
+        await using var cmd = new NpgsqlCommand("SELECT dt.checkpoint_orchestration($1, $2, $3, $4, $5, $6, $7, $8)", connection);
+
+        cmd.Parameters.AddWithValue(workItem.InstanceId);
+        cmd.Parameters.AddWithValue(instance.ExecutionId ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue(orchestrationState.OrchestrationStatus.ToString());
+
+        // Custom status payload (TEXT / JSON). NULL when empty.
+        var customStatus = orchestrationState.Status;
+        cmd.Parameters.AddWithValue(!string.IsNullOrEmpty(customStatus) ? customStatus : (object)DBNull.Value);
+
+        // Deleted events, history, orchestration, and task events as typed composite
+        // arrays. Npgsql needs the element DataTypeName (with the [] suffix) to write
+        // arrays of mapped composite types.
+        var pDeleted = cmd.Parameters.AddWithValue(deletedEvents);
+        pDeleted.DataTypeName = $"{_settings.SchemaName}.message_id[]";
+        var pHistory = cmd.Parameters.AddWithValue(historyEvents);
+        pHistory.DataTypeName = $"{_settings.SchemaName}.history_event[]";
+        var pOrch = cmd.Parameters.AddWithValue(orchestrationEvents.ToArray());
+        pOrch.DataTypeName = $"{_settings.SchemaName}.orchestration_event[]";
+        var pTask = cmd.Parameters.AddWithValue(taskEvents.ToArray());
+        pTask.DataTypeName = $"{_settings.SchemaName}.task_event[]";
+
+        try
+        {
+            await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+        }
+        catch (PostgresException ex)
+        {
+            // Split-brain (duplicate execution) manifests as a primary key violation
+            // on dt.history and is expected. Re-throw everything else after logging
+            // the full error, because the DTFx WorkItemDispatcher swallows exceptions
+            // and otherwise only surfaces a generic "Abandoning" warning.
+            if (!IsUniqueKeyViolation(ex))
+            {
+                _logger.LogError(ex,
+                    "checkpoint_orchestration failed for instance {InstanceId} (SQLSTATE={SqlState})",
+                    workItem.InstanceId, ex.SqlState);
+            }
+
+            throw;
+        }
 
         _logger.LogDebug(
             "Checkpoint completed for orchestration {InstanceId}",
             workItem.InstanceId);
     }
 
-    static string BuildHistoryEventJson(HistoryEvent evt, OrchestrationInstance instance, int sequenceNumber)
+    static bool IsUniqueKeyViolation(PostgresException ex)
+        => ex.SqlState == PostgresErrorCodes.UniqueViolation;
+
+    static PostgreSqlTypes.HistoryEvent ToHistoryEventRecord(HistoryEvent evt, OrchestrationInstance instance, int sequenceNumber)
     {
-        var eventType = evt.EventType.ToString();
-        var name = GetEventName(evt);
-        var version = GetEventVersion(evt);
-        var reason = GetEventReason(evt);
-        var payloadText = GetEventPayload(evt);
-        var taskId = GetTaskEventId(evt);
-        var visibleTime = GetEventVisibleTime(evt);
-        var isPlayed = evt.IsPlayed;
-        var parentInstanceId = GetParentInstanceId(evt);
-        var traceContext = GetTraceContext(evt);
-
-        return $@"{{
-            ""instanceId"":""{instance.InstanceId}"",
-            ""executionId"":""{instance.ExecutionId}"",
-            ""sequenceNumber"":{sequenceNumber},
-            ""eventType"":""{eventType}"",
-            ""name"":{name},
-            ""runtimeStatus"":""{GetRuntimeStatus(evt)}"",
-            ""taskId"":{taskId},
-            ""timestamp"":""{DateTime.UtcNow:O}"",
-            ""isPlayed"":{isPlayed.ToString().ToUpperInvariant()},
-            ""visibleTime"":{visibleTime},
-            ""reason"":{reason},
-            ""payloadText"":{payloadText},
-            ""payloadId"":null,
-            ""parentInstanceId"":{parentInstanceId},
-            ""version"":{version},
-            ""traceContext"":{traceContext}
-        }}";
-    }
-
-    static string BuildOrchestrationEventJson(TaskMessage msg)
-    {
-        var eventType = msg.Event.EventType.ToString();
-        var name = GetEventName(msg.Event);
-        var version = GetEventVersion(msg.Event);
-        var reason = GetEventReason(msg.Event);
-        var payloadText = GetEventPayload(msg.Event);
-        var taskId = GetTaskEventId(msg.Event);
-        var visibleTime = GetEventVisibleTime(msg.Event);
-        var parentInstanceId = GetParentInstanceId(msg.Event);
-        var traceContext = GetTraceContext(msg.Event);
-
-        return $@"{{
-            ""instanceId"":""{msg.OrchestrationInstance.InstanceId}"",
-            ""executionId"":""{msg.OrchestrationInstance.ExecutionId}"",
-            ""eventType"":""{eventType}"",
-            ""name"":{name},
-            ""runtimeStatus"":""Pending"",
-            ""taskId"":{taskId},
-            ""visibleTime"":{visibleTime},
-            ""reason"":{reason},
-            ""payloadText"":{payloadText},
-            ""payloadId"":null,
-            ""parentInstanceId"":{parentInstanceId},
-            ""version"":{version},
-            ""traceContext"":{traceContext}
-        }}";
-    }
-
-    static string BuildTaskEventJson(TaskMessage msg, TaskScheduledEvent scheduledEvent)
-    {
-        var name = scheduledEvent.Name ?? "Unknown";
-        var version = scheduledEvent.Version ?? "";
-        var input = scheduledEvent.Input ?? "";
-        var traceContext = GetTraceContext(msg.Event);
-
-        return $@"{{
-            ""instanceId"":""{msg.OrchestrationInstance.InstanceId}"",
-            ""executionId"":""{msg.OrchestrationInstance.ExecutionId}"",
-            ""name"":""{name}"",
-            ""eventType"":""TaskScheduled"",
-            ""taskId"":{scheduledEvent.EventId},
-            ""visibleTime"":null,
-            ""lockedBy"":null,
-            ""lockExpiration"":null,
-            ""reason"":null,
-            ""payloadText"":{EscapeJsonString(input)},
-            ""payloadId"":null,
-            ""version"":""{version}"",
-            ""traceContext"":{traceContext}
-        }}";
-    }
-
-    static string? GetEventName(HistoryEvent evt)
-    {
-        return evt.EventType switch
+        string? payloadText = ToJsonText(GetEventPayloadValue(evt));
+        string? reason = GetEventReasonValue(evt);
+        return new PostgreSqlTypes.HistoryEvent
         {
-            EventType.EventRaised => ((EventRaisedEvent)evt).Name,
-            EventType.EventSent => ((EventSentEvent)evt).Name,
-            EventType.ExecutionStarted => ((ExecutionStartedEvent)evt).Name,
-            EventType.SubOrchestrationInstanceCreated => ((SubOrchestrationInstanceCreatedEvent)evt).Name,
-            EventType.TaskScheduled => ((TaskScheduledEvent)evt).Name,
-            _ => null,
-        } is string s ? $"\"{s}\"" : "null";
-    }
-
-    static string? GetEventVersion(HistoryEvent evt)
-    {
-        return evt.EventType switch
-        {
-            EventType.ExecutionStarted => ((ExecutionStartedEvent)evt).Version,
-            EventType.SubOrchestrationInstanceCreated => ((SubOrchestrationInstanceCreatedEvent)evt).Version,
-            EventType.TaskScheduled => ((TaskScheduledEvent)evt).Version,
-            _ => null,
-        } is string s ? $"\"{s}\"" : "null";
-    }
-
-    static string? GetEventReason(HistoryEvent evt)
-    {
-        return evt.EventType switch
-        {
-            EventType.ExecutionTerminated => ((ExecutionTerminatedEvent)evt).Input,
-            EventType.TaskFailed => ((TaskFailedEvent)evt).Reason,
-            EventType.SubOrchestrationInstanceFailed => ((SubOrchestrationInstanceFailedEvent)evt).Reason,
-            _ => null,
-        } is string s ? $"\"{EscapeJsonString(s)}\"" : "null";
-    }
-
-    static string? GetEventPayload(HistoryEvent evt)
-    {
-        string? payload = evt.EventType switch
-        {
-            EventType.ContinueAsNew => ((ContinueAsNewEvent)evt).Result,
-            EventType.EventRaised => ((EventRaisedEvent)evt).Input,
-            EventType.EventSent => ((EventSentEvent)evt).Input,
-            EventType.ExecutionCompleted => ((ExecutionCompletedEvent)evt).Result,
-            EventType.ExecutionFailed => ((ExecutionCompletedEvent)evt).Result,
-            EventType.ExecutionStarted => ((ExecutionStartedEvent)evt).Input,
-            EventType.ExecutionTerminated => ((ExecutionTerminatedEvent)evt).Input,
-            EventType.GenericEvent => ((GenericEvent)evt).Data,
-            EventType.SubOrchestrationInstanceCompleted => ((SubOrchestrationInstanceCompletedEvent)evt).Result,
-            EventType.SubOrchestrationInstanceCreated => ((SubOrchestrationInstanceCreatedEvent)evt).Input,
-            EventType.SubOrchestrationInstanceFailed => ((SubOrchestrationInstanceFailedEvent)evt).Details,
-            EventType.TaskCompleted => ((TaskCompletedEvent)evt).Result,
-            EventType.TaskFailed => ((TaskFailedEvent)evt).Details,
-            EventType.TaskScheduled => ((TaskScheduledEvent)evt).Input,
-            _ => null,
-        };
-        
-        return payload != null ? EscapeJsonString(payload) : "null";
-    }
-
-    static int GetTaskEventId(HistoryEvent evt)
-    {
-        return evt.EventType switch
-        {
-            EventType.TaskCompleted => ((TaskCompletedEvent)evt).TaskScheduledId,
-            EventType.TaskFailed => ((TaskFailedEvent)evt).TaskScheduledId,
-            EventType.SubOrchestrationInstanceCompleted => ((SubOrchestrationInstanceCompletedEvent)evt).TaskScheduledId,
-            EventType.SubOrchestrationInstanceFailed => ((SubOrchestrationInstanceFailedEvent)evt).TaskScheduledId,
-            EventType.TimerFired => ((TimerFiredEvent)evt).TimerId,
-            _ => evt.EventId,
+            InstanceId = instance.InstanceId,
+            ExecutionId = instance.ExecutionId,
+            SequenceNumber = sequenceNumber,
+            EventType = evt.EventType.ToString(),
+            Name = GetEventNameValue(evt),
+            RuntimeStatus = GetRuntimeStatusValue(evt),
+            TaskId = GetTaskEventId(evt),
+            // Npgsql requires UTC (offset 0) when writing DateTimeOffset to
+            // timestamptz; DurableTask.Core Timestamps may carry a local offset.
+            Timestamp = evt.Timestamp.ToUniversalTime(),
+            IsPlayed = evt.IsPlayed,
+            VisibleTime = ToUtc(GetEventVisibleTimeValue(evt)),
+            Reason = reason,
+            PayloadText = payloadText,
+            // The checkpoint inserts a payloads row when payload_text or reason is
+            // non-null; that row's payload_id is NOT NULL, so we generate one here.
+            PayloadId = (payloadText != null || reason != null) ? Guid.NewGuid() : null,
+            ParentInstanceId = GetParentInstanceIdValue(evt),
+            Version = GetEventVersionValue(evt),
+            TraceContext = GetTraceContextValue(evt),
         };
     }
 
-    static string? GetEventVisibleTime(HistoryEvent evt)
+    static PostgreSqlTypes.OrchestrationEvent ToOrchestrationEventRecord(TaskMessage msg)
     {
-        return evt.EventType switch
+        var evt = msg.Event;
+        string? payloadText = ToJsonText(GetEventPayloadValue(evt));
+        return new PostgreSqlTypes.OrchestrationEvent
         {
-            EventType.TimerCreated => ((TimerCreatedEvent)evt).FireAt.ToString("O"),
-            EventType.TimerFired => ((TimerFiredEvent)evt).FireAt.ToString("O"),
-            _ => "null",
+            InstanceId = msg.OrchestrationInstance.InstanceId,
+            ExecutionId = msg.OrchestrationInstance.ExecutionId,
+            EventType = evt.EventType.ToString(),
+            Name = GetEventNameValue(evt),
+            RuntimeStatus = "Pending",
+            TaskId = GetTaskEventId(evt),
+            VisibleTime = ToUtc(GetEventVisibleTimeValue(evt)),
+            Reason = GetEventReasonValue(evt),
+            PayloadText = payloadText,
+            PayloadId = payloadText != null ? Guid.NewGuid() : null,
+            ParentInstanceId = GetParentInstanceIdValue(evt),
+            Version = GetEventVersionValue(evt),
+            TraceContext = GetTraceContextValue(evt),
         };
     }
 
-    static string? GetRuntimeStatus(HistoryEvent evt)
+    static DateTimeOffset? ToUtc(DateTimeOffset? value) => value?.ToUniversalTime();
+
+    // The payload_text columns are JSONB, so a non-null payload must be valid JSON.
+    // DurableTask.Core payloads are arbitrary strings (e.g. a deserialized "World"
+    // from history replay, which is not valid JSON). Serialize such values as JSON
+    // strings. Payloads that are already valid JSON (objects/arrays/quoted strings
+    // coming straight from the create path) are passed through unchanged.
+    static string? ToJsonText(string? payload)
     {
-        return evt.EventType switch
+        if (payload is null)
         {
-            EventType.ExecutionCompleted => ((ExecutionCompletedEvent)evt).OrchestrationStatus.ToString(),
-            EventType.ExecutionFailed => ((ExecutionCompletedEvent)evt).OrchestrationStatus.ToString(),
-            _ => "null",
+            return null;
+        }
+
+        try
+        {
+            // Validate it's already JSON; if so, keep as-is.
+            using var doc = JsonDocument.Parse(payload);
+            return payload;
+        }
+        catch (JsonException)
+        {
+            // Not JSON — wrap as a JSON string so the JSONB column accepts it.
+            return JsonSerializer.Serialize(payload);
+        }
+    }
+
+    static PostgreSqlTypes.TaskEvent ToTaskEventRecord(TaskMessage msg, TaskScheduledEvent scheduledEvent)
+    {
+        string? payloadText = ToJsonText(scheduledEvent.Input);
+        return new PostgreSqlTypes.TaskEvent
+        {
+            InstanceId = msg.OrchestrationInstance.InstanceId,
+            ExecutionId = msg.OrchestrationInstance.ExecutionId,
+            Name = scheduledEvent.Name,
+            EventType = EventType.TaskScheduled.ToString(),
+            TaskId = scheduledEvent.EventId,
+            VisibleTime = null,
+            Reason = null,
+            PayloadText = payloadText,
+            PayloadId = payloadText != null ? Guid.NewGuid() : null,
+            Version = scheduledEvent.Version,
+            TraceContext = GetTraceContextValue(msg.Event),
         };
     }
 
-    static string? GetParentInstanceId(HistoryEvent evt)
+    static PostgreSqlTypes.TaskResult ToTaskResultRecord(TaskMessage msg)
+    {
+        var instance = msg.OrchestrationInstance;
+        var evt = msg.Event;
+        string? payloadText = ToJsonText(GetEventPayloadValue(evt));
+
+        int taskId = evt.EventId;
+        if (evt is TaskCompletedEvent completed)
+        {
+            taskId = completed.TaskScheduledId;
+        }
+        else if (evt is TaskFailedEvent failed)
+        {
+            taskId = failed.TaskScheduledId;
+        }
+
+        return new PostgreSqlTypes.TaskResult
+        {
+            InstanceId = instance.InstanceId,
+            ExecutionId = instance.ExecutionId,
+            Name = GetEventNameValue(evt),
+            EventType = evt.EventType.ToString(),
+            TaskId = taskId,
+            VisibleTime = null,
+            PayloadText = payloadText,
+            PayloadId = payloadText != null ? Guid.NewGuid() : null,
+            Reason = GetEventReasonValue(evt),
+            TraceContext = GetTraceContextValue(evt),
+        };
+    }
+
+    // ---- Raw-value extractors (return the underlying value, not a JSON literal) ----
+
+    static string? GetEventNameValue(HistoryEvent evt) => evt.EventType switch
+    {
+        EventType.EventRaised => ((EventRaisedEvent)evt).Name,
+        EventType.EventSent => ((EventSentEvent)evt).Name,
+        EventType.ExecutionStarted => ((ExecutionStartedEvent)evt).Name,
+        EventType.SubOrchestrationInstanceCreated => ((SubOrchestrationInstanceCreatedEvent)evt).Name,
+        EventType.TaskScheduled => ((TaskScheduledEvent)evt).Name,
+        _ => null,
+    };
+
+    static string? GetEventVersionValue(HistoryEvent evt) => evt.EventType switch
+    {
+        EventType.ExecutionStarted => ((ExecutionStartedEvent)evt).Version,
+        EventType.SubOrchestrationInstanceCreated => ((SubOrchestrationInstanceCreatedEvent)evt).Version,
+        EventType.TaskScheduled => ((TaskScheduledEvent)evt).Version,
+        _ => null,
+    };
+
+    static string? GetEventReasonValue(HistoryEvent evt) => evt.EventType switch
+    {
+        EventType.ExecutionTerminated => ((ExecutionTerminatedEvent)evt).Input,
+        EventType.TaskFailed => ((TaskFailedEvent)evt).Reason,
+        EventType.SubOrchestrationInstanceFailed => ((SubOrchestrationInstanceFailedEvent)evt).Reason,
+        _ => null,
+    };
+
+    static string? GetEventPayloadValue(HistoryEvent evt) => evt.EventType switch
+    {
+        EventType.ContinueAsNew => ((ContinueAsNewEvent)evt).Result,
+        EventType.EventRaised => ((EventRaisedEvent)evt).Input,
+        EventType.EventSent => ((EventSentEvent)evt).Input,
+        EventType.ExecutionCompleted => ((ExecutionCompletedEvent)evt).Result,
+        EventType.ExecutionFailed => ((ExecutionCompletedEvent)evt).Result,
+        EventType.ExecutionStarted => ((ExecutionStartedEvent)evt).Input,
+        EventType.ExecutionTerminated => ((ExecutionTerminatedEvent)evt).Input,
+        EventType.GenericEvent => ((GenericEvent)evt).Data,
+        EventType.SubOrchestrationInstanceCompleted => ((SubOrchestrationInstanceCompletedEvent)evt).Result,
+        EventType.SubOrchestrationInstanceCreated => ((SubOrchestrationInstanceCreatedEvent)evt).Input,
+        EventType.SubOrchestrationInstanceFailed => ((SubOrchestrationInstanceFailedEvent)evt).Details,
+        EventType.TaskCompleted => ((TaskCompletedEvent)evt).Result,
+        EventType.TaskFailed => ((TaskFailedEvent)evt).Details,
+        EventType.TaskScheduled => ((TaskScheduledEvent)evt).Input,
+        _ => null,
+    };
+
+    static int GetTaskEventId(HistoryEvent evt) => evt.EventType switch
+    {
+        EventType.TaskCompleted => ((TaskCompletedEvent)evt).TaskScheduledId,
+        EventType.TaskFailed => ((TaskFailedEvent)evt).TaskScheduledId,
+        EventType.SubOrchestrationInstanceCompleted => ((SubOrchestrationInstanceCompletedEvent)evt).TaskScheduledId,
+        EventType.SubOrchestrationInstanceFailed => ((SubOrchestrationInstanceFailedEvent)evt).TaskScheduledId,
+        EventType.TimerFired => ((TimerFiredEvent)evt).TimerId,
+        _ => evt.EventId,
+    };
+
+    static DateTimeOffset? GetEventVisibleTimeValue(HistoryEvent evt) => evt.EventType switch
+    {
+        EventType.TimerCreated => ((TimerCreatedEvent)evt).FireAt,
+        EventType.TimerFired => ((TimerFiredEvent)evt).FireAt,
+        _ => null,
+    };
+
+    static string? GetRuntimeStatusValue(HistoryEvent evt) => evt.EventType switch
+    {
+        EventType.ExecutionCompleted => ((ExecutionCompletedEvent)evt).OrchestrationStatus.ToString(),
+        EventType.ExecutionFailed => ((ExecutionCompletedEvent)evt).OrchestrationStatus.ToString(),
+        _ => null,
+    };
+
+    static string? GetParentInstanceIdValue(HistoryEvent evt)
     {
         if (evt.EventType == EventType.ExecutionStarted)
         {
             var parent = ((ExecutionStartedEvent)evt).ParentInstance;
-            return parent != null ? $"\"{parent.OrchestrationInstance.InstanceId}\"" : "null";
+            return parent?.OrchestrationInstance.InstanceId;
         }
-        return "null";
+        return null;
     }
 
-    static string? GetTraceContext(HistoryEvent evt)
+    static string? GetTraceContextValue(HistoryEvent evt)
     {
         if (evt is ISupportsDurableTraceContext traceEvent && traceEvent.ParentTraceContext != null)
         {
-            return $"\"{traceEvent.ParentTraceContext.TraceParent}\"";
+            return traceEvent.ParentTraceContext.TraceParent;
         }
-        return "null";
-    }
-
-    static string EscapeJsonString(string? s)
-    {
-        if (s == null) 
-        {
-            return "null";
-        }
-
-        return $"\"{s.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal).Replace("\r", "\\r", StringComparison.Ordinal)}\"";
+        return null;
     }
 
     public async Task CompleteTaskActivityWorkItemAsync(TaskActivityWorkItem workItem, TaskMessage responseMessage)
@@ -653,14 +687,25 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
         await using var cmd = new NpgsqlCommand("SELECT dt.complete_tasks($1, $2)", connection);
 
-        // Sequence numbers to complete
+        // Sequence numbers to complete (BIGINT[])
         cmd.Parameters.AddWithValue(new[] { workItem.TaskMessage.SequenceNumber });
 
-        // Build task result
-        var result = BuildTaskResultJson(responseMessage);
-        cmd.Parameters.AddWithValue($"[{result}]");
+        // Task results as a typed dt.task_result[] array.
+        var pResult = cmd.Parameters.AddWithValue(new[] { ToTaskResultRecord(responseMessage) });
+        pResult.DataTypeName = $"{_settings.SchemaName}.task_result[]";
 
-        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+        try
+        {
+            await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+        }
+        catch (PostgresException ex)
+        {
+            _logger.LogError(ex,
+                "complete_tasks failed for instance {InstanceId}, event {EventId} (SQLSTATE={SqlState})",
+                workItem.TaskMessage.OrchestrationInstance.InstanceId,
+                workItem.TaskMessage.Event.EventId, ex.SqlState);
+            throw;
+        }
 
         var instance = workItem.TaskMessage.OrchestrationInstance;
         _logger.LogDebug(
@@ -668,38 +713,6 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             instance.InstanceId);
     }
 
-    static string BuildTaskResultJson(TaskMessage msg)
-    {
-        var instance = msg.OrchestrationInstance;
-        var eventType = msg.Event.EventType.ToString();
-        var name = GetEventName(msg.Event);
-        var payloadText = GetEventPayload(msg.Event);
-        var reason = GetEventReason(msg.Event);
-        var traceContext = GetTraceContext(msg.Event);
-        
-        int taskId = msg.Event.EventId;
-        if (msg.Event is TaskCompletedEvent completed)
-        {
-            taskId = completed.TaskScheduledId;
-        }
-        else if (msg.Event is TaskFailedEvent failed)
-        {
-            taskId = failed.TaskScheduledId;
-        }
-
-        return $@"{{
-            ""instanceId"":""{instance.InstanceId}"",
-            ""executionId"":""{instance.ExecutionId}"",
-            ""name"":{name},
-            ""eventType"":""{eventType}"",
-            ""taskId"":{taskId},
-            ""visibleTime"":null,
-            ""payloadText"":{payloadText},
-            ""payloadId"":null,
-            ""reason"":{reason},
-            ""traceContext"":{traceContext}
-        }}";
-    }
 
     public Task AbandonTaskOrchestrationWorkItemAsync(TaskOrchestrationWorkItem workItem)
     {
@@ -1185,17 +1198,39 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         var schemaSql = await File.ReadAllTextAsync(schemaPath).ConfigureAwait(false);
         var logicSql = await File.ReadAllTextAsync(logicPath).ConfigureAwait(false);
 
-        await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
+        // Deploy via a raw NpgsqlConnection instead of the pooled _dataSource.
+        // The _dataSource has composite type mappings registered; its type cache is
+        // built on first connection. If that first connection were this deploy
+        // (before the dt.* types exist), the composite mappings would fail to
+        // resolve later. Using a separate connection keeps _dataSource's cache clean
+        // until the schema is in place.
+        var connectionBuilder = new NpgsqlConnectionStringBuilder(_settings.ConnectionString);
+        if (!string.IsNullOrEmpty(_settings.TaskHubName))
+        {
+            connectionBuilder.ApplicationName = _settings.TaskHubName;
+        }
 
-        await using (var cmd = new NpgsqlCommand(schemaSql, connection))
+        await using var connection = new NpgsqlConnection(connectionBuilder.ConnectionString);
+        await connection.OpenAsync().ConfigureAwait(false);
+
+        // Deploy schema + logic atomically. If either script fails (e.g. a
+        // function signature change), the whole deployment is rolled back so the
+        // database is not left in a half-upgraded state. The logic.sql script
+        // drops functions up-front, so RETURN-type changes no longer fail with
+        // SQLSTATE 42P13.
+        await using var transaction = await connection.BeginTransactionAsync().ConfigureAwait(false);
+
+        await using (var cmd = new NpgsqlCommand(schemaSql, connection, transaction))
         {
             await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
 
-        await using (var cmd = new NpgsqlCommand(logicSql, connection))
+        await using (var cmd = new NpgsqlCommand(logicSql, connection, transaction))
         {
             await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
+
+        await transaction.CommitAsync().ConfigureAwait(false);
 
         _logger.LogInformation("Schema deployed successfully");
     }

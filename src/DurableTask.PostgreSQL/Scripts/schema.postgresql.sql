@@ -180,9 +180,14 @@ CREATE TABLE IF NOT EXISTS dt.global_settings (
     last_modified_by VARCHAR(128) NOT NULL DEFAULT CURRENT_USER
 );
 
--- Default task hub mode (1 = User ID based)
+-- Default task hub mode:
+--   0 = use connection application_name (authoritative for TaskHubName from C# settings)
+--   1 = use current database user
+-- Mode 0 is the default so that the C# TaskHubName setting (propagated as the
+-- Npgsql ApplicationName) governs the task hub. Existing databases keep their
+-- current value due to ON CONFLICT DO NOTHING.
 INSERT INTO dt.global_settings (name, value)
-VALUES ('TaskHubMode', '1')
+VALUES ('TaskHubMode', '0')
 ON CONFLICT (name) DO NOTHING;
 
 -- =============================================================================

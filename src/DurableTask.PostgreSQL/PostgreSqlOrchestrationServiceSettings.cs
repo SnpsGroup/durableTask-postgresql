@@ -11,7 +11,10 @@ public sealed class PostgreSqlOrchestrationServiceSettings
     public required string ConnectionString { get; init; }
 
     /// <summary>
-    /// Task hub name. If null, will use current database user.
+    /// Task hub name. When set, it is propagated to PostgreSQL as the connection's
+    /// ApplicationName and used as the task hub when TaskHubMode = '0' (the default).
+    /// When null/empty, the task hub falls back to the current database user
+    /// (CURRENT_USER, i.e. TaskHubMode = '1').
     /// </summary>
     public string? TaskHubName { get; init; }
 
