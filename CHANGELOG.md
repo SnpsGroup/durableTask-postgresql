@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No changes yet.
 
+## [1.0.0-alpha.3] - 2026-07-04
+
+### Fixed
+- **SchemaName setting was not honored end-to-end.** The embedded SQL scripts and many inline SQL
+  commands were hard-coded to the default schema `dt`. When consumers configured a non-default
+  `SchemaName` (or relied on the previous default `dtf`), deployment created objects in `dt` while
+  runtime queries targeted the configured schema, causing `schema "..." does not exist` and
+  `composite type ... does not exist` errors. The provider now rewrites the embedded scripts to use
+  the configured schema at deploy time and uses `{_settings.SchemaName}` in all inline SQL
+  statements. The default schema remains `dt` for backwards compatibility.
+
 ## [1.0.0-alpha.2] - 2026-06-16
 
 Critical bug-fix release addressing the orchestration abandonment defect reported by the

@@ -102,7 +102,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
         // Verify connectivity
         await using var connection = await _dataSource.OpenConnectionAsync(_shutdownTokenSource.Token).ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.current_task_hub()", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.current_task_hub()", connection);
         var taskHub = await cmd.ExecuteScalarAsync(_shutdownTokenSource.Token).ConfigureAwait(false) as string;
 
         _logger.LogInformation("Connected to PostgreSQL. TaskHub={TaskHub}", taskHub);
@@ -140,7 +140,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
-                "SELECT * FROM dt.lock_next_orchestration($1, $2, $3)",
+                $"SELECT * FROM {_settings.SchemaName}.lock_next_orchestration($1, $2, $3)",
                 connection);
 
             cmd.Parameters.AddWithValue(_settings.MaxConcurrentOrchestrations);
@@ -227,7 +227,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
                 // Discard events and release lock
                 await using var discardCmd = new NpgsqlCommand(
-                    "UPDATE dt.instances SET locked_by = NULL, lock_expiration = NULL WHERE instance_id = $1",
+                    $"UPDATE {_settings.SchemaName}.instances SET locked_by = NULL, lock_expiration = NULL WHERE instance_id = $1",
                     connection);
                 discardCmd.Parameters.AddWithValue(instanceId);
                 await discardCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -272,7 +272,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
-                "SELECT * FROM dt.lock_next_task($1, $2)",
+                $"SELECT * FROM {_settings.SchemaName}.lock_next_task($1, $2)",
                 connection);
 
             cmd.Parameters.AddWithValue(_settings.WorkerId);
@@ -411,7 +411,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
 
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.checkpoint_orchestration($1, $2, $3, $4, $5, $6, $7, $8)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.checkpoint_orchestration($1, $2, $3, $4, $5, $6, $7, $8)", connection);
 
         cmd.Parameters.AddWithValue(workItem.InstanceId);
         cmd.Parameters.AddWithValue(instance.ExecutionId ?? (object)DBNull.Value);
@@ -686,7 +686,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             workItem.TaskMessage.OrchestrationInstance.InstanceId, responseMessage.Event.EventType);
 
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.complete_tasks($1, $2)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.complete_tasks($1, $2)", connection);
 
         // Sequence numbers to complete (BIGINT[])
         cmd.Parameters.AddWithValue(new[] { workItem.TaskMessage.SequenceNumber });
@@ -738,7 +738,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         var lockExpiration = DateTimeOffset.UtcNow.Add(_settings.LockTimeout);
 
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.renew_orchestration_locks($1, $2)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.renew_orchestration_locks($1, $2)", connection);
 
         cmd.Parameters.AddWithValue(workItem.InstanceId);
         cmd.Parameters.AddWithValue(lockExpiration);
@@ -804,7 +804,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         ArgumentNullException.ThrowIfNull(message.OrchestrationInstance);
 
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.add_orchestration_event($1, $2, $3, $4, $5)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.add_orchestration_event($1, $2, $3, $4, $5)", connection);
 
         var eventType = message.Event.EventType.ToString();
         string? name = null;
@@ -855,7 +855,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
         await using var cmd = new NpgsqlCommand(
-            "SELECT * FROM dt.query_single_orchestration($1)",
+            $"SELECT * FROM {_settings.SchemaName}.query_single_orchestration($1)",
             connection);
 
         cmd.Parameters.AddWithValue(instanceId);
@@ -896,7 +896,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     public async Task<string> GetOrchestrationHistoryAsync(string instanceId, string? executionId)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.get_instance_history($1, $2)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.get_instance_history($1, $2)", connection);
 
         cmd.Parameters.AddWithValue(instanceId);
         cmd.Parameters.AddWithValue(executionId ?? (object)DBNull.Value);
@@ -908,7 +908,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     public async Task PurgeOrchestrationHistoryAsync(DateTime thresholdDateTimeUtc, OrchestrationStateTimeRangeFilterType timeRangeFilterType)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.purge_instance_state_by_time($1, $2)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.purge_instance_state_by_time($1, $2)", connection);
 
         cmd.Parameters.AddWithValue(thresholdDateTimeUtc);
         cmd.Parameters.AddWithValue((short)timeRangeFilterType);
@@ -919,7 +919,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     public async Task<PurgeResult> PurgeInstanceStateAsync(string instanceId)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.purge_instance_state_by_id($1)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.purge_instance_state_by_id($1)", connection);
 
         cmd.Parameters.AddWithValue(new[] { instanceId });
 
@@ -936,7 +936,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             : null;
 
         await using var cmd = new NpgsqlCommand(
-            "SELECT dt.purge_instance_state_by_time($1, $2)",
+            $"SELECT {_settings.SchemaName}.purge_instance_state_by_time($1, $2)",
             connection);
 
         cmd.Parameters.AddWithValue(purgeInstanceFilter.CreatedTimeTo ?? DateTime.MaxValue);
@@ -951,7 +951,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         CancellationToken cancellationToken)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT * FROM dt.query_many_orchestrations($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT * FROM {_settings.SchemaName}.query_many_orchestrations($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
 
         var createdTimeFrom = query.CreatedTimeFrom != default ? query.CreatedTimeFrom : DateTime.MinValue;
         var createdTimeTo = query.CreatedTimeTo != default ? query.CreatedTimeTo : DateTime.MaxValue;
@@ -1000,7 +1000,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         CancellationToken cancellationToken)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT * FROM dt.query_many_orchestrations($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT * FROM {_settings.SchemaName}.query_many_orchestrations($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
 
         cmd.Parameters.AddWithValue(query.PageSize);
         cmd.Parameters.AddWithValue(query.PageNumber);
@@ -1035,7 +1035,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     public async Task RewindTaskOrchestrationAsync(string instanceId, string reason)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.rewind_instance($1, $2)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.rewind_instance($1, $2)", connection);
 
         cmd.Parameters.AddWithValue(instanceId);
         cmd.Parameters.AddWithValue(reason ?? (object)DBNull.Value);
@@ -1049,7 +1049,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var cmd = new NpgsqlCommand(
-            "SELECT dt.get_scale_recommendation($1, $2)",
+            $"SELECT {_settings.SchemaName}.get_scale_recommendation($1, $2)",
             connection);
 
         cmd.Parameters.AddWithValue(_settings.MaxConcurrentOrchestrations);
@@ -1071,7 +1071,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     public async Task ForceTerminateTaskOrchestrationAsync(string instanceId, string? reason)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.terminate_instance($1, $2)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.terminate_instance($1, $2)", connection);
 
         cmd.Parameters.AddWithValue(instanceId);
         cmd.Parameters.AddWithValue(reason ?? (object)DBNull.Value);
@@ -1123,7 +1123,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
         await using var cmd = new NpgsqlCommand(
-            "SELECT dt.create_instance($1, $2, $3, $4, $5, $6, $7, $8)",
+            $"SELECT {_settings.SchemaName}.create_instance($1, $2, $3, $4, $5, $6, $7, $8)",
             connection);
 
         cmd.Parameters.AddWithValue(startEvent.Name);
@@ -1197,6 +1197,11 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         var schemaSql = await GetEmbeddedScriptAsync("schema.postgresql.sql").ConfigureAwait(false);
         var logicSql = await GetEmbeddedScriptAsync("logic.postgresql.sql").ConfigureAwait(false);
 
+        // The embedded scripts are authored against the default 'dt' schema. Rewrite
+        // them to use the configured schema name so SchemaName is honored end-to-end.
+        schemaSql = RewriteSchemaName(schemaSql);
+        logicSql = RewriteSchemaName(logicSql);
+
         // Deploy via a raw NpgsqlConnection instead of the pooled _dataSource.
         // The _dataSource has composite type mappings registered; its type cache is
         // built on first connection. If that first connection were this deploy
@@ -1231,7 +1236,20 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
         await transaction.CommitAsync().ConfigureAwait(false);
 
-        _logger.LogInformation("Schema deployed successfully");
+        _logger.LogInformation("Schema '{SchemaName}' deployed successfully", _settings.SchemaName);
+    }
+
+    private string RewriteSchemaName(string sql)
+    {
+        // Rewrite default schema qualifier "dt." and the schema creation statement
+        // to use the configured schema name. This keeps the embedded scripts stable
+        // while allowing consumers to choose any valid PostgreSQL identifier.
+        sql = sql.Replace("dt.", $"{_settings.SchemaName}.", StringComparison.Ordinal);
+        sql = sql.Replace(
+            "CREATE SCHEMA IF NOT EXISTS dt;",
+            $"CREATE SCHEMA IF NOT EXISTS {_settings.SchemaName};",
+            StringComparison.Ordinal);
+        return sql;
     }
 
     public Task StopAsync(bool isForced)
@@ -1246,7 +1264,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         var lockExpiration = DateTimeOffset.UtcNow.Add(_settings.LockTimeout);
 
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand("SELECT dt.renew_task_locks($1, $2)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.renew_task_locks($1, $2)", connection);
 
         cmd.Parameters.AddWithValue(new[] { workItem.TaskMessage.SequenceNumber });
         cmd.Parameters.AddWithValue(lockExpiration);
