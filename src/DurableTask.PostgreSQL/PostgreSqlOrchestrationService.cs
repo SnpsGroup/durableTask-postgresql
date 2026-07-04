@@ -23,6 +23,13 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     private readonly NpgsqlDataSource _dataSource;
     private readonly CancellationTokenSource _shutdownTokenSource = new();
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="PostgreSqlOrchestrationService"/> with the
+    /// specified settings and logger. Constructs the Npgsql data source with composite type
+    /// mappings for the configured PostgreSQL schema.
+    /// </summary>
+    /// <param name="settings">Service configuration. Must not be <c>null</c>.</param>
+    /// <param name="logger">Logger for diagnostic output. Must not be <c>null</c>.</param>
     public PostgreSqlOrchestrationService(
         PostgreSqlOrchestrationServiceSettings settings,
         ILogger<PostgreSqlOrchestrationService> logger)
@@ -69,14 +76,25 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     // IOrchestrationService Implementation
     // =============================================================================
 
+    /// <inheritdoc cref="IOrchestrationService.MaxConcurrentTaskOrchestrationWorkItems" />
     public int MaxConcurrentTaskOrchestrationWorkItems => _settings.MaxConcurrentOrchestrations;
+
+    /// <inheritdoc cref="IOrchestrationService.MaxConcurrentTaskActivityWorkItems" />
     public int MaxConcurrentTaskActivityWorkItems => _settings.MaxConcurrentActivities;
+
+    /// <inheritdoc cref="IOrchestrationService.TaskOrchestrationDispatcherCount" />
     public int TaskOrchestrationDispatcherCount => 1; // Single dispatcher for simplicity
+
+    /// <inheritdoc cref="IOrchestrationService.TaskActivityDispatcherCount" />
     public int TaskActivityDispatcherCount => 1;
+
+    /// <inheritdoc cref="IOrchestrationService.EventBehaviourForContinueAsNew" />
     public BehaviorOnContinueAsNew EventBehaviourForContinueAsNew => BehaviorOnContinueAsNew.Carryover;
 
+    /// <inheritdoc cref="IOrchestrationService.CreateAsync()" />
     public Task CreateAsync() => CreateAsync(recreateInstanceStore: false);
 
+    /// <inheritdoc cref="IOrchestrationService.CreateAsync(bool)" />
     public async Task CreateAsync(bool recreateInstanceStore)
     {
         if (recreateInstanceStore)
@@ -94,8 +112,10 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         _logger.LogInformation("PostgreSqlOrchestrationService created successfully");
     }
 
+    /// <inheritdoc cref="IOrchestrationService.CreateIfNotExistsAsync()" />
     public Task CreateIfNotExistsAsync() => CreateAsync(recreateInstanceStore: false);
 
+    /// <inheritdoc cref="IOrchestrationService.StartAsync()" />
     public async Task StartAsync()
     {
         _logger.LogInformation("Starting PostgreSqlOrchestrationService...");
@@ -108,6 +128,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         _logger.LogInformation("Connected to PostgreSQL. TaskHub={TaskHub}", taskHub);
     }
 
+    /// <inheritdoc cref="IOrchestrationService.StopAsync()" />
     public async Task StopAsync()
     {
         _logger.LogInformation("Stopping PostgreSqlOrchestrationService...");
@@ -119,8 +140,10 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         _logger.LogInformation("PostgreSqlOrchestrationService stopped");
     }
 
+    /// <inheritdoc cref="IOrchestrationService.DeleteAsync()" />
     public Task DeleteAsync() => DeleteAsync(deleteInstanceStore: false);
 
+    /// <inheritdoc cref="IOrchestrationService.DeleteAsync(bool)" />
     public Task DeleteAsync(bool deleteInstanceStore)
     {
         if (deleteInstanceStore)
@@ -130,6 +153,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.LockNextTaskOrchestrationWorkItemAsync" />
     public async Task<TaskOrchestrationWorkItem?> LockNextTaskOrchestrationWorkItemAsync(
         TimeSpan receiveTimeout,
         CancellationToken cancellationToken)
@@ -262,6 +286,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         public OrchestrationInstance Instance { get; }
     }
 
+    /// <inheritdoc cref="IOrchestrationService.LockNextTaskActivityWorkItem" />
     public async Task<TaskActivityWorkItem?> LockNextTaskActivityWorkItem(
         TimeSpan receiveTimeout,
         CancellationToken cancellationToken)
@@ -336,6 +361,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
     }
 
+    /// <inheritdoc cref="IOrchestrationService.CompleteTaskOrchestrationWorkItemAsync" />
     public async Task CompleteTaskOrchestrationWorkItemAsync(
         TaskOrchestrationWorkItem workItem,
         OrchestrationRuntimeState newOrchestrationRuntimeState,
@@ -679,6 +705,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return null;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.CompleteTaskActivityWorkItemAsync" />
     public async Task CompleteTaskActivityWorkItemAsync(TaskActivityWorkItem workItem, TaskMessage responseMessage)
     {
         _logger.LogDebug(
@@ -715,6 +742,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     }
 
 
+    /// <inheritdoc cref="IOrchestrationService.AbandonTaskOrchestrationWorkItemAsync" />
     public Task AbandonTaskOrchestrationWorkItemAsync(TaskOrchestrationWorkItem workItem)
     {
         // Release lock by not renewing
@@ -722,17 +750,20 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.AbandonTaskActivityWorkItem" />
     public Task AbandonTaskActivityWorkItem(TaskActivityWorkItem workItem)
     {
         _logger.LogWarning("Abandoning activity work item");
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.ReleaseTaskOrchestrationWorkItemAsync" />
     public Task ReleaseTaskOrchestrationWorkItemAsync(TaskOrchestrationWorkItem workItem)
     {
         return AbandonTaskOrchestrationWorkItemAsync(workItem);
     }
 
+    /// <inheritdoc cref="IOrchestrationService.RenewTaskOrchestrationWorkItemLockAsync" />
     public async Task RenewTaskOrchestrationWorkItemLockAsync(TaskOrchestrationWorkItem workItem)
     {
         var lockExpiration = DateTimeOffset.UtcNow.Add(_settings.LockTimeout);
@@ -748,16 +779,19 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         workItem.LockedUntilUtc = lockExpiration.DateTime;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.IsMaxMessageCountExceeded" />
     public bool IsMaxMessageCountExceeded(int currentMessageCount, OrchestrationRuntimeState runtimeState)
     {
         return false; // No limit for now
     }
 
+    /// <inheritdoc cref="IOrchestrationService.GetDelayInSecondsAfterOnProcessException" />
     public int GetDelayInSecondsAfterOnProcessException(Exception exception)
     {
         return 10; // Retry after 10 seconds
     }
 
+    /// <inheritdoc cref="IOrchestrationService.GetDelayInSecondsAfterOnFetchException" />
     public int GetDelayInSecondsAfterOnFetchException(Exception exception)
     {
         return 5; // Retry after 5 seconds
@@ -767,6 +801,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     // IOrchestrationServiceClient Implementation
     // =============================================================================
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.CreateTaskOrchestrationAsync(TaskMessage)" />
     public async Task CreateTaskOrchestrationAsync(TaskMessage creationMessage)
     {
         ArgumentNullException.ThrowIfNull(creationMessage);
@@ -786,6 +821,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             createdInstanceId, startEvent.Name, startEvent.Version);
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.CreateTaskOrchestrationAsync(TaskMessage, OrchestrationStatus[])" />
     public async Task CreateTaskOrchestrationAsync(TaskMessage creationMessage, OrchestrationStatus[]? dedupeStatuses)
     {
         ArgumentNullException.ThrowIfNull(creationMessage);
@@ -798,6 +834,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         await CreateTaskOrchestrationCoreAsync(instance, startEvent, dedupeStatuses).ConfigureAwait(false);
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.SendTaskOrchestrationMessageAsync" />
     public async Task SendTaskOrchestrationMessageAsync(TaskMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -849,6 +886,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             message.OrchestrationInstance.InstanceId, eventType);
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.GetOrchestrationStateAsync(string, string)" />
     public async Task<OrchestrationState?> GetOrchestrationStateAsync(string instanceId, string? executionId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(instanceId);
@@ -883,6 +921,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return orchestrationState;
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.GetOrchestrationStateAsync(string, bool)" />
     public async Task<IList<OrchestrationState>> GetOrchestrationStateAsync(string instanceId, bool allExecutions)
     {
         var state = await GetOrchestrationStateAsync(instanceId, null).ConfigureAwait(false);
@@ -893,6 +932,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return new[] { state };
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.GetOrchestrationHistoryAsync" />
     public async Task<string> GetOrchestrationHistoryAsync(string instanceId, string? executionId)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
@@ -905,6 +945,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return result?.ToString() ?? "[]";
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.PurgeOrchestrationHistoryAsync" />
     public async Task PurgeOrchestrationHistoryAsync(DateTime thresholdDateTimeUtc, OrchestrationStateTimeRangeFilterType timeRangeFilterType)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
@@ -916,6 +957,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.PurgeInstanceStateAsync(string)" />
     public async Task<PurgeResult> PurgeInstanceStateAsync(string instanceId)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
@@ -927,6 +969,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return new PurgeResult(Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture));
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.PurgeInstanceStateAsync(PurgeInstanceFilter)" />
     public async Task<PurgeResult> PurgeInstanceStateAsync(PurgeInstanceFilter purgeInstanceFilter)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
@@ -946,6 +989,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return new PurgeResult(Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture));
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.GetOrchestrationWithQueryAsync" />
     public async Task<OrchestrationQueryResult> GetOrchestrationWithQueryAsync(
         OrchestrationQuery query,
         CancellationToken cancellationToken)
@@ -995,6 +1039,14 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return new OrchestrationQueryResult(results, continuationToken);
     }
 
+    /// <summary>
+    /// Retrieves multiple orchestration instances matching the specified query parameters.
+    /// This is a PostgreSQL-specific extension that supports richer filtering than the
+    /// standard <see cref="IOrchestrationServiceClient.GetOrchestrationWithQueryAsync"/>.
+    /// </summary>
+    /// <param name="query">Query filters including pagination, time range, status, and ID prefix.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A read-only collection of matching orchestration states.</returns>
     public async Task<IReadOnlyCollection<OrchestrationState>> GetManyOrchestrationsAsync(
         PostgreSqlOrchestrationQuery query,
         CancellationToken cancellationToken)
@@ -1032,6 +1084,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return results;
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.RewindTaskOrchestrationAsync" />
     public async Task RewindTaskOrchestrationAsync(string instanceId, string reason)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
@@ -1045,6 +1098,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         _logger.LogInformation("Rewound orchestration {InstanceId}, reason={Reason}", instanceId, reason);
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.GetRecommendedReplicaCountAsync" />
     public async Task<int> GetRecommendedReplicaCountAsync(int? currentReplicaCount = null, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -1068,6 +1122,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return recommendedCount;
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.ForceTerminateTaskOrchestrationAsync" />
     public async Task ForceTerminateTaskOrchestrationAsync(string instanceId, string? reason)
     {
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
@@ -1081,6 +1136,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         _logger.LogInformation("Terminated orchestration {InstanceId}, reason={Reason}", instanceId, reason);
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.WaitForOrchestrationAsync" />
     public async Task<OrchestrationState> WaitForOrchestrationAsync(
         string instanceId,
         string? executionId,
@@ -1252,6 +1308,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return sql;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.StopAsync(bool)" />
     public Task StopAsync(bool isForced)
     {
         _logger.LogInformation("Stopping PostgreSqlOrchestrationService (isForced={IsForced})", isForced);
@@ -1259,6 +1316,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.RenewTaskActivityWorkItemLockAsync" />
     public async Task<TaskActivityWorkItem> RenewTaskActivityWorkItemLockAsync(TaskActivityWorkItem workItem)
     {
         var lockExpiration = DateTimeOffset.UtcNow.Add(_settings.LockTimeout);
@@ -1275,12 +1333,14 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         return workItem;
     }
 
+    /// <inheritdoc cref="IOrchestrationService.AbandonTaskActivityWorkItemAsync" />
     public Task AbandonTaskActivityWorkItemAsync(TaskActivityWorkItem workItem)
     {
         // Same behavior as DurableTask.SqlServer: no-op and return completed task.
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc cref="IOrchestrationServiceClient.SendTaskOrchestrationMessageBatchAsync" />
     public async Task SendTaskOrchestrationMessageBatchAsync(params TaskMessage[] messages)
     {
         if (messages == null || messages.Length == 0)
@@ -1296,6 +1356,10 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         _logger.LogDebug("Sent batch of {Count} messages", messages.Length);
     }
 
+    /// <summary>
+    /// Disposes the PostgreSQL data source and shutdown token source, releasing all
+    /// database connections and internal resources held by this service.
+    /// </summary>
     public void Dispose()
     {
         _shutdownTokenSource?.Dispose();

@@ -30,10 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.x"
 
@@ -47,7 +47,7 @@ jobs:
         run: dotnet pack src/DurableTask.PostgreSQL/DurableTask.PostgreSQL.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: nuget-packages
           path: ./artifacts/*
@@ -63,7 +63,7 @@ jobs:
       contents: read
     steps:
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: nuget-packages
           path: ./artifacts
