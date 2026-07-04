@@ -743,24 +743,32 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
 
     /// <inheritdoc cref="IOrchestrationService.AbandonTaskOrchestrationWorkItemAsync" />
-    public Task AbandonTaskOrchestrationWorkItemAsync(TaskOrchestrationWorkItem workItem)
+    public async Task AbandonTaskOrchestrationWorkItemAsync(TaskOrchestrationWorkItem workItem)
     {
-        // Release lock by not renewing
-        _logger.LogWarning("Abandoning orchestration work item {InstanceId}", workItem.InstanceId);
-        return Task.CompletedTask;
+        _logger.LogWarning("Abandoning orchestration work item {InstanceId} (will retry)", workItem.InstanceId);
+
+        // Reset lock immediately so the next worker can retry faster
+        await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
+        await using var cmd = new NpgsqlCommand(
+            $"UPDATE {_settings.SchemaName}.instances SET locked_by = NULL, lock_expiration = NULL WHERE instance_id = $1",
+            connection);
+        cmd.Parameters.AddWithValue(workItem.InstanceId);
+        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
     /// <inheritdoc cref="IOrchestrationService.AbandonTaskActivityWorkItem" />
     public Task AbandonTaskActivityWorkItem(TaskActivityWorkItem workItem)
     {
-        _logger.LogWarning("Abandoning activity work item");
+        _logger.LogWarning("Abandoning activity work item {Id} (will retry)", workItem.Id);
         return Task.CompletedTask;
     }
 
     /// <inheritdoc cref="IOrchestrationService.ReleaseTaskOrchestrationWorkItemAsync" />
     public Task ReleaseTaskOrchestrationWorkItemAsync(TaskOrchestrationWorkItem workItem)
     {
-        return AbandonTaskOrchestrationWorkItemAsync(workItem);
+        // Lock is already released by checkpoint_orchestration; nothing to do.
+        _logger.LogDebug("Releasing orchestration work item {InstanceId}", workItem.InstanceId);
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc cref="IOrchestrationService.RenewTaskOrchestrationWorkItemLockAsync" />
@@ -1334,10 +1342,17 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     }
 
     /// <inheritdoc cref="IOrchestrationService.AbandonTaskActivityWorkItemAsync" />
-    public Task AbandonTaskActivityWorkItemAsync(TaskActivityWorkItem workItem)
+    public async Task AbandonTaskActivityWorkItemAsync(TaskActivityWorkItem workItem)
     {
-        // Same behavior as DurableTask.SqlServer: no-op and return completed task.
-        return Task.CompletedTask;
+        _logger.LogWarning("Abandoning activity work item {Id} (will retry)", workItem.Id);
+
+        // Reset lock immediately so the next worker can retry faster
+        await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
+        await using var cmd = new NpgsqlCommand(
+            $"UPDATE {_settings.SchemaName}.new_tasks SET locked_by = NULL, lock_expiration = NULL WHERE sequence_number = $1",
+            connection);
+        cmd.Parameters.AddWithValue(workItem.TaskMessage.SequenceNumber);
+        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
     /// <inheritdoc cref="IOrchestrationServiceClient.SendTaskOrchestrationMessageBatchAsync" />
