@@ -7,6 +7,7 @@ using DurableTask.Core.History;
 using DurableTask.Core.Query;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using System.Reflection;
 using System.Text.Json;
 
@@ -405,12 +406,15 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         var orchestrationEvents = new List<PostgreSqlTypes.OrchestrationEvent>();
         if (orchestratorMessages != null)
         {
+            // Forward every orchestrator-emitted message. These target OTHER instances (e.g. a
+            // parent receiving a SubOrchestrationInstanceCompletedEvent, or a ContinueAsNew
+            // ExecutionStarted). Filtering to ExecutionStartedEvent alone dropped sub-orchestration
+            // completions, leaving parents stuck in Running forever. The SQL gates instance
+            // CREATION on event_type='ExecutionStarted', so non-start events are safely inserted
+            // into new_events for their target instance without spawning phantom instances.
             foreach (var msg in orchestratorMessages)
             {
-                if (msg.Event is ExecutionStartedEvent)
-                {
-                    orchestrationEvents.Add(ToOrchestrationEventRecord(msg));
-                }
+                orchestrationEvents.Add(ToOrchestrationEventRecord(msg));
             }
         }
         if (timerMessages != null)
@@ -422,6 +426,15 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
                     orchestrationEvents.Add(ToOrchestrationEventRecord(msg));
                 }
             }
+        }
+        // ContinueAsNew: the runtime hands the next generation's ExecutionStartedEvent (with a new
+        // execution id and the next input) as a standalone message. Route it into the orchestration
+        // events so checkpoint_orchestration inserts it into new_events (waking the next generation)
+        // and detects the execution-id change to clear prior history. Without this, the orchestration
+        // completes on its first execution instead of continuing.
+        if (continuedAsNewMessage != null)
+        {
+            orchestrationEvents.Add(ToOrchestrationEventRecord(continuedAsNewMessage));
         }
 
         var taskEvents = new List<PostgreSqlTypes.TaskEvent>();
@@ -669,6 +682,12 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         EventType.SubOrchestrationInstanceCompleted => ((SubOrchestrationInstanceCompletedEvent)evt).TaskScheduledId,
         EventType.SubOrchestrationInstanceFailed => ((SubOrchestrationInstanceFailedEvent)evt).TaskScheduledId,
         EventType.TimerFired => ((TimerFiredEvent)evt).TimerId,
+        // ExecutionStarted's own EventId is always -1 (DTFx dispatches it that way). For a
+        // sub-orchestration's ExecutionStarted we must instead persist the PARENT's schedule id
+        // (the EventId of the parent's SubOrchestrationInstanceCreatedEvent), which the runtime
+        // reads back as runtimeState.ParentInstance.TaskScheduleId to build the completion event.
+        // Storing -1 here left sub-orchestration completions unmatched (TaskScheduledId=-1).
+        EventType.ExecutionStarted => ((ExecutionStartedEvent)evt).ParentInstance?.TaskScheduleId ?? -1,
         _ => evt.EventId,
     };
 
@@ -980,21 +999,44 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     /// <inheritdoc cref="IOrchestrationServiceClient.PurgeInstanceStateAsync(PurgeInstanceFilter)" />
     public async Task<PurgeResult> PurgeInstanceStateAsync(PurgeInstanceFilter purgeInstanceFilter)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
+        // Mirrors the MSSQL provider: collect matching instance IDs via the paginated query,
+        // then delete them in batches. Reusing GetManyOrchestrationsAsync gives full status-set
+        // filtering (the by_time function only accepts a single SMALLINT status enum).
+        var purgeQuery = new PostgreSqlOrchestrationQuery
+        {
+            PageSize = 1000,
+            CreatedTimeFrom = purgeInstanceFilter.CreatedTimeFrom,
+            CreatedTimeTo = purgeInstanceFilter.CreatedTimeTo ?? DateTime.MaxValue,
+            FetchInput = false,
+            FetchOutput = false,
+            StatusFilter = purgeInstanceFilter.RuntimeStatus?.Any() == true
+                ? new HashSet<OrchestrationStatus>(purgeInstanceFilter.RuntimeStatus)
+                : null,
+        };
 
-        var statusFilter = purgeInstanceFilter.RuntimeStatus?.Any() == true
-            ? string.Join(",", purgeInstanceFilter.RuntimeStatus)
-            : null;
+        int totalPurgedCount = 0;
+        while (true)
+        {
+            IReadOnlyCollection<OrchestrationState> results =
+                await GetManyOrchestrationsAsync(purgeQuery, CancellationToken.None).ConfigureAwait(false);
 
-        await using var cmd = new NpgsqlCommand(
-            $"SELECT {_settings.SchemaName}.purge_instance_state_by_time($1, $2)",
-            connection);
+            if (results.Count == 0)
+            {
+                break;
+            }
 
-        cmd.Parameters.AddWithValue(purgeInstanceFilter.CreatedTimeTo ?? DateTime.MaxValue);
-        cmd.Parameters.AddWithValue(statusFilter ?? (object)DBNull.Value);
+            string[] instanceIds = results.Select(r => r.OrchestrationInstance.InstanceId).ToArray();
 
-        var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
-        return new PurgeResult(Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture));
+            await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
+            await using var cmd = new NpgsqlCommand(
+                $"SELECT {_settings.SchemaName}.purge_instance_state_by_id($1)", connection);
+            cmd.Parameters.AddWithValue(instanceIds);
+
+            var deleted = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
+            totalPurgedCount += Convert.ToInt32(deleted, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return new PurgeResult(totalPurgedCount);
     }
 
     /// <inheritdoc cref="IOrchestrationServiceClient.GetOrchestrationWithQueryAsync" />
@@ -1002,11 +1044,16 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         OrchestrationQuery query,
         CancellationToken cancellationToken)
     {
+        if (query.TaskHubNames?.Any() == true)
+        {
+            throw new NotSupportedException("Querying orchestrations by task hub name is not supported.");
+        }
+
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var cmd = new NpgsqlCommand($"SELECT * FROM {_settings.SchemaName}.query_many_orchestrations($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
 
-        var createdTimeFrom = query.CreatedTimeFrom != default ? query.CreatedTimeFrom : DateTime.MinValue;
-        var createdTimeTo = query.CreatedTimeTo != default ? query.CreatedTimeTo : DateTime.MaxValue;
+        var createdTimeFrom = query.CreatedTimeFrom ?? DateTime.MinValue;
+        var createdTimeTo = query.CreatedTimeTo ?? DateTime.MaxValue;
 
         int pageNumber = 0;
         if (!string.IsNullOrWhiteSpace(query.ContinuationToken) && int.TryParse(query.ContinuationToken, out int parsedPage))
@@ -1014,23 +1061,22 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             pageNumber = parsedPage;
         }
 
-        cmd.Parameters.AddWithValue(query.PageSize > 0 ? query.PageSize : 100);
-        cmd.Parameters.AddWithValue(pageNumber);
-        cmd.Parameters.AddWithValue(query.FetchInputsAndOutputs);
-        cmd.Parameters.AddWithValue(query.FetchInputsAndOutputs);
-        cmd.Parameters.AddWithValue(createdTimeFrom!);
-        cmd.Parameters.AddWithValue(createdTimeTo!);
-        cmd.Parameters.AddWithValue(query.InstanceIdPrefix ?? (object)DBNull.Value);
-        cmd.Parameters.AddWithValue(false);
-
-        if (query.RuntimeStatus?.Count > 0)
-        {
-            cmd.Parameters.AddWithValue(string.Join(",", query.RuntimeStatus));
-        }
-        else
-        {
-            cmd.Parameters.AddWithValue(DBNull.Value);
-        }
+        // Parameters are positional ($1..$9) and typed explicitly so PostgreSQL can resolve the
+        // function overload unambiguously (SMALLINT page_size, VARCHAR filters, timestamptz).
+        // Untyped AddWithValue sends integer/text/timestamp-without-tz, which fails with 42883.
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Smallint, Value = (short)(query.PageSize > 0 ? query.PageSize : 100) });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = pageNumber });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = query.FetchInputsAndOutputs });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = query.FetchInputsAndOutputs });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.TimestampTz,
+            Value = DateTime.SpecifyKind(createdTimeFrom, DateTimeKind.Utc) });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.TimestampTz,
+            Value = DateTime.SpecifyKind(createdTimeTo, DateTimeKind.Utc) });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Varchar,
+            Value = query.InstanceIdPrefix ?? (object)DBNull.Value });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = false });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Varchar,
+            Value = query.RuntimeStatus?.Count > 0 ? string.Join(",", query.RuntimeStatus) : DBNull.Value });
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1062,23 +1108,24 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var cmd = new NpgsqlCommand($"SELECT * FROM {_settings.SchemaName}.query_many_orchestrations($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
 
-        cmd.Parameters.AddWithValue(query.PageSize);
-        cmd.Parameters.AddWithValue(query.PageNumber);
-        cmd.Parameters.AddWithValue(query.FetchInput);
-        cmd.Parameters.AddWithValue(query.FetchOutput);
-        cmd.Parameters.AddWithValue(query.CreatedTimeFrom);
-        cmd.Parameters.AddWithValue(query.CreatedTimeTo);
-        cmd.Parameters.AddWithValue(query.InstanceIdPrefix ?? (object)DBNull.Value);
-        cmd.Parameters.AddWithValue(query.ExcludeSubOrchestrations);
-
-        if (query.StatusFilter?.Count > 0)
-        {
-            cmd.Parameters.AddWithValue(string.Join(",", query.StatusFilter));
-        }
-        else
-        {
-            cmd.Parameters.AddWithValue(DBNull.Value);
-        }
+        // Parameters are positional ($1..$9 in the SQL) and typed explicitly so PostgreSQL can
+        // resolve the function overload unambiguously (SMALLINT page_size, VARCHAR filters, etc.).
+        // Untyped AddWithValue would send integer/text, which don't match the signature.
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Smallint, Value = (short)query.PageSize });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = query.PageNumber });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = query.FetchInput });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = query.FetchOutput });
+        // query_many_orchestrations expects TIMESTAMP WITH TIME ZONE; normalize to UTC so any
+        // caller works regardless of the DateTime.Kind.
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.TimestampTz,
+            Value = DateTime.SpecifyKind(query.CreatedTimeFrom, DateTimeKind.Utc) });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.TimestampTz,
+            Value = DateTime.SpecifyKind(query.CreatedTimeTo, DateTimeKind.Utc) });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Varchar,
+            Value = query.InstanceIdPrefix ?? (object)DBNull.Value });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = query.ExcludeSubOrchestrations });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Varchar,
+            Value = query.StatusFilter?.Count > 0 ? string.Join(",", query.StatusFilter) : DBNull.Value });
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1281,6 +1328,35 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         await using var connection = new NpgsqlConnection(connectionBuilder.ConnectionString);
         await connection.OpenAsync().ConfigureAwait(false);
 
+        // Concurrent deployments (parallel test classes, or multiple service instances
+        // starting against the same DB) can race on CREATE SCHEMA: two transactions both
+        // see the schema as missing, one wins, and the loser hits either a unique-violation
+        // on pg_namespace (23505) or a deadlock (40P01). Both mean "another transaction is
+        // creating/upgrading the schema" — since the scripts are idempotent, a retry succeeds.
+        const int maxAttempts = 5;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await DeploySchemaScriptsAsync(connection, schemaSql, logicSql).ConfigureAwait(false);
+                await ApplyMigrationsAsync(connection).ConfigureAwait(false);
+                break;
+            }
+            catch (PostgresException ex) when (
+                (ex.SqlState == PostgresErrorCodes.UniqueViolation ||
+                 ex.SqlState == "40P01") &&
+                attempt < maxAttempts)
+            {
+                _logger.LogWarning(ex, "Concurrent schema deployment detected (attempt {Attempt}/{Max}); retrying", attempt, maxAttempts);
+                await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+
+        _logger.LogInformation("Schema '{SchemaName}' deployed successfully", _settings.SchemaName);
+    }
+
+    private static async Task DeploySchemaScriptsAsync(NpgsqlConnection connection, string schemaSql, string logicSql)
+    {
         // Deploy schema + logic atomically. If either script fails (e.g. a
         // function signature change), the whole deployment is rolled back so the
         // database is not left in a half-upgraded state. The logic.sql script
@@ -1299,8 +1375,131 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
 
         await transaction.CommitAsync().ConfigureAwait(false);
+    }
 
-        _logger.LogInformation("Schema '{SchemaName}' deployed successfully", _settings.SchemaName);
+    /// <summary>
+    /// Applies pending forward migrations from embedded <c>Scripts/migrations/migration-{semver}.postgresql.sql</c>
+    /// resources. The baseline (<c>schema.postgresql.sql</c>) is idempotent and creates everything for a fresh
+    /// install; this runner handles subsequent upgrades by applying each migration whose version is newer than the
+    /// newest row in <c>dt.versions</c>, recording each as it applies. Migrations must be idempotent-safe per the
+    /// PostgreSQL convention (<c>ADD COLUMN IF NOT EXISTS</c>, <c>CREATE TYPE IF NOT EXISTS</c>, etc.).
+    /// </summary>
+    private async Task ApplyMigrationsAsync(NpgsqlConnection connection)
+    {
+        var assembly = typeof(PostgreSqlOrchestrationService).Assembly;
+        const string prefix = ".Scripts.migrations.migration-";
+        var migrationSuffix = ".postgresql.sql";
+
+        // Discover migration scripts and parse their version from the resource name.
+        var migrations = new List<(string ResourceForm, int[] Parts, string ResourceName)>();
+        foreach (var name in assembly.GetManifestResourceNames())
+        {
+            int idx = name.IndexOf(prefix, StringComparison.Ordinal);
+            if (idx < 0 || !name.EndsWith(migrationSuffix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string versionPart = name.Substring(idx + prefix.Length, name.Length - idx - prefix.Length - migrationSuffix.Length);
+            if (TryParseVersion(versionPart, out var parsed))
+            {
+                migrations.Add((parsed.ResourceForm, parsed.Parts, name));
+            }
+            else
+            {
+                _logger.LogWarning("Skipping migration with unparseable version: {Resource}", name);
+            }
+        }
+
+        if (migrations.Count == 0)
+        {
+            return;
+        }
+
+        // Newest applied version recorded in dt.versions.
+        string appliedMax = await GetMaxAppliedVersionAsync(connection).ConfigureAwait(false);
+        var appliedComparison = ParseForComparison(appliedMax);
+
+        foreach (var (resourceForm, parts, resourceName) in migrations.OrderBy(m => m.Parts, Comparer<int[]>.Create(CompareVersions)))
+        {
+            if (appliedComparison.Length > 0 && CompareVersions(parts, appliedComparison) <= 0)
+            {
+                continue; // already applied (or baseline covers it)
+            }
+
+            string sql = await GetEmbeddedResourceAsync(resourceName).ConfigureAwait(false);
+            sql = RewriteSchemaName(sql);
+
+            _logger.LogInformation("Applying schema migration {Version}", resourceForm);
+            await using var tx = await connection.BeginTransactionAsync().ConfigureAwait(false);
+            await using (var cmd = new NpgsqlCommand(sql, connection, tx))
+            {
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+            }
+
+            // Record the migration version.
+            await using (var cmd = new NpgsqlCommand(
+                $"INSERT INTO {_settings.SchemaName}.versions (semantic_version) VALUES ($1) ON CONFLICT DO NOTHING",
+                connection, tx))
+            {
+                cmd.Parameters.AddWithValue(resourceForm);
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+            }
+
+            await tx.CommitAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task<string> GetMaxAppliedVersionAsync(NpgsqlConnection connection)
+    {
+        await using var cmd = new NpgsqlCommand(
+            $"SELECT semantic_version FROM {_settings.SchemaName}.versions ORDER BY semantic_version DESC LIMIT 1",
+            connection);
+        var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
+        return result as string ?? "0.0.0";
+    }
+
+    private static async Task<string> GetEmbeddedResourceAsync(string resourceName)
+    {
+        Assembly assembly = typeof(PostgreSqlOrchestrationService).Assembly;
+        using Stream? stream = assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Missing embedded resource '{resourceName}'.");
+        using var reader = new StreamReader(stream);
+        return await reader.ReadToEndAsync().ConfigureAwait(false);
+    }
+
+    // Versions in resource names are dotted semver strings (e.g. "1.0.0", "1.1.0").
+    // We parse them into a comparable form, tolerating pre-release suffixes by trimming them.
+    private static bool TryParseVersion(string text, out (string ResourceForm, int[] Parts) parsed)
+    {
+        parsed = default;
+        string core = text.Split('-', '+')[0];
+        var parts = core.Split('.');
+        if (parts.Length < 2) return false;
+        var ints = new List<int>();
+        foreach (var p in parts)
+        {
+            if (!int.TryParse(p, out var n)) return false;
+            ints.Add(n);
+        }
+        while (ints.Count < 3) ints.Add(0);
+        parsed = (text, ints.ToArray());
+        return true;
+    }
+
+    private static int[] ParseForComparison(string text) =>
+        TryParseVersion(text, out var parsed) ? parsed.Parts : Array.Empty<int>();
+
+    private static int CompareVersions(int[] a, int[] b)
+    {
+        int len = Math.Max(a.Length, b.Length);
+        for (int i = 0; i < len; i++)
+        {
+            int av = i < a.Length ? a[i] : 0;
+            int bv = i < b.Length ? b[i] : 0;
+            if (av != bv) return av.CompareTo(bv);
+        }
+        return 0;
     }
 
     private string RewriteSchemaName(string sql)

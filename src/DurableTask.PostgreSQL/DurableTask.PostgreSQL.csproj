@@ -9,7 +9,7 @@
     <!-- NuGet Package Metadata -->
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>DurableTask.PostgreSQL</PackageId>
-    <Version>1.0.0-alpha.3</Version>
+    <Version>1.0.0</Version>
     <Authors>SnpsGroup Engineering</Authors>
     <Company>SnpsGroup</Company>
     <Description>PostgreSQL backend for Microsoft Durable Task Framework (DTFx)</Description>
@@ -29,6 +29,10 @@
     <!-- Local NuGet Package Output -->
     <LocalNuGetPath Condition="'$(LocalNuGetPath)'==''"></LocalNuGetPath>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DurableTask.PostgreSQL.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Azure.DurableTask.Core">
@@ -54,11 +58,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <!-- SQL scripts are embedded as resources (mirrors DurableTask.SqlServer),
          so build and publish produce identical artifacts and the runtime reads
          them from the assembly rather than the output directory. -->
     <EmbeddedResource Include="Scripts\*.sql" />
+    <!-- Forward migrations, discovered and applied in semver order on startup. -->
+    <EmbeddedResource Include="Scripts\migrations\*.sql" />
   </ItemGroup>
 
   <!-- Custom target to publish to local NuGet feed after pack -->

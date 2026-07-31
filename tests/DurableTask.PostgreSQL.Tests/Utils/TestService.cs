@@ -10,15 +10,17 @@ using DurableTask.Core.History;
 public sealed class TestService : IAsyncLifetime
 {
     private readonly string _connectionString;
+    private readonly string _taskHubName;
     private ILoggerFactory _loggerFactory;
     private ILogger<TestService> _logger;
     private PostgreSqlOrchestrationService? _orchestrationService;
     private PostgreSqlOrchestrationService? _clientService;
     private readonly List<LogEntry> _logs = [];
 
-    public TestService(string connectionString)
+    public TestService(string connectionString, string? taskHubName = null)
     {
         _connectionString = connectionString;
+        _taskHubName = taskHubName ?? "TestHub";
         var builder = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>
         {
             builder.AddDebug();
@@ -39,7 +41,7 @@ public sealed class TestService : IAsyncLifetime
         var settings = new PostgreSqlOrchestrationServiceSettings
         {
             ConnectionString = _connectionString,
-            TaskHubName = "TestHub",
+            TaskHubName = _taskHubName,
             MaxConcurrentOrchestrations = 10,
             MaxConcurrentActivities = 10,
             AutoDeploySchema = true,

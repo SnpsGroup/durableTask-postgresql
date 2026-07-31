@@ -4,9 +4,7 @@ using System.Text.Json;
 using DurableTask.Core;
 using DurableTask.Core.History;
 using DurableTask.Core.Tracing;
-using Microsoft.Extensions.Logging;
 using Npgsql;
-using NpgsqlTypes;
 
 namespace DurableTask.PostgreSQL;
 
@@ -201,7 +199,10 @@ static class PostgreSqlUtils
 
         if (reader.TryGetProperty("timestamp", out var timestampElement))
         {
-            historyEvent.Timestamp = timestampElement.GetDateTime();
+            // The column is TIMESTAMP WITH TIME ZONE (UTC), but JsonElement.GetDateTime
+            // returns DateTimeKind.Unspecified/Local. Normalize to Utc so consumers that
+            // require Utc (e.g. the DTFx v2 gRPC sidecar's Timestamp.FromDateTime) work.
+            historyEvent.Timestamp = DateTime.SpecifyKind(timestampElement.GetDateTime(), DateTimeKind.Utc);
         }
         
         if (isOrchestrationHistory && reader.TryGetProperty("isPlayed", out var isPlayedElement))
@@ -254,7 +255,11 @@ static class PostgreSqlUtils
             },
             OrchestrationStatus = GetRuntimeStatus(reader),
             Status = GetJsonStringOrNull(reader, "custom_status_text"),
-            ParentInstance = parentInstance
+            ParentInstance = parentInstance,
+            // Tags are not persisted (no schema column), but default to an empty non-null
+            // dictionary: consumers like the DTFx v2 gRPC sidecar do MapField.Add(Tags),
+            // which throws ArgumentNullException on null.
+            Tags = new Dictionary<string, string>(),
         };
 
         string? rawOutput = GetJsonStringOrNull(reader, "output_text");
@@ -278,7 +283,7 @@ static class PostgreSqlUtils
     {
         if (reader.TryGetProperty("visibleTime", out var visibleTimeElement) && visibleTimeElement.ValueKind != JsonValueKind.Null)
         {
-            return visibleTimeElement.GetDateTime();
+            return DateTime.SpecifyKind(visibleTimeElement.GetDateTime(), DateTimeKind.Utc);
         }
         return null;
     }
@@ -369,7 +374,7 @@ static class PostgreSqlUtils
 
         if (reader.TryGetProperty("timestamp", out var timestampElement))
         {
-            traceContext.ActivityStartTime = timestampElement.GetDateTime();
+            traceContext.ActivityStartTime = DateTime.SpecifyKind(timestampElement.GetDateTime(), DateTimeKind.Utc);
         }
 
         return traceContext;
@@ -427,54 +432,6 @@ static class PostgreSqlUtils
         {
             failureDetails = null;
             return false;
-        }
-    }
-
-    public static NpgsqlParameter AddArrayParameter<T>(this NpgsqlParameterCollection parameters, string parameterName, T[]? values, NpgsqlDbType dbType)
-    {
-        var parameter = parameters.Add(parameterName, dbType);
-        if (values != null && values.Length > 0)
-        {
-            parameter.Value = values;
-        }
-        else
-        {
-            parameter.Value = Array.Empty<T>();
-        }
-        return parameter;
-    }
-
-    public static async Task<int> ExecuteNonQueryAsync(
-        NpgsqlCommand command,
-        ILogger logger,
-        string? instanceId = null,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error executing command for instance {InstanceId}", instanceId ?? "unknown");
-            throw;
-        }
-    }
-
-    public static async Task<NpgsqlDataReader> ExecuteReaderAsync(
-        NpgsqlCommand command,
-        ILogger logger,
-        string? instanceId = null,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error executing reader for instance {InstanceId}", instanceId ?? "unknown");
-            throw;
         }
     }
 }

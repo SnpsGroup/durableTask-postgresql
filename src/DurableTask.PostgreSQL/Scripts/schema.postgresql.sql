@@ -6,7 +6,7 @@
 -- Based on: https://github.com/microsoft/durabletask-mssql
 --
 -- Target: PostgreSQL 17+
--- Version: 0.1.0-poc
+-- Version: 1.0.0
 
 -- =============================================================================
 -- SCHEMA CREATION
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS dt.versions (
 
 -- Insert initial version
 INSERT INTO dt.versions (semantic_version)
-VALUES ('0.1.0-poc')
+VALUES ('1.0.0')
 ON CONFLICT (semantic_version) DO NOTHING;
 
 -- Table: dt.payloads

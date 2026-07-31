@@ -8,6 +8,7 @@ using Xunit;
 
 namespace DurableTask.PostgreSQL.Tests.Integration;
 
+[Collection("integration")]
 public sealed class OrchestrationsTests : IAsyncLifetime
 {
     private TestService? _testService;
@@ -24,7 +25,7 @@ public sealed class OrchestrationsTests : IAsyncLifetime
             return;
         }
 
-        _testService = new TestService(ConnectionString);
+        _testService = new TestService(ConnectionString, taskHubName: "OrchTestsHub");
         await _testService.InitializeAsync();
     }
 
@@ -118,6 +119,41 @@ public sealed class OrchestrationsTests : IAsyncLifetime
         var state = await client.GetOrchestrationStateAsync("non-existing-instance", null);
 
         Assert.Null(state);
+    }
+
+    /// <summary>
+    /// Regression for GitHub issue #3 part 2: OrchestrationState.Tags must be a non-null
+    /// (empty) dictionary so consumers like the DTFx v2 gRPC sidecar's MapField.Add(Tags)
+    /// do not throw ArgumentNullException.
+    /// </summary>
+    [Fact]
+    public async Task GetOrchestrationState_Tags_IsNotNull()
+    {
+        if (!_isDatabaseAvailable)
+        {
+            return;
+        }
+
+        var client = _testService!.ClientService;
+
+        var instanceId = Guid.NewGuid().ToString();
+        await client.CreateTaskOrchestrationAsync(new TaskMessage
+        {
+            OrchestrationInstance = new OrchestrationInstance { InstanceId = instanceId },
+            Event = new ExecutionStartedEvent(-1, JsonSerializer.Serialize("test"))
+            {
+                Name = "TestOrchestration",
+                OrchestrationInstance = new OrchestrationInstance { InstanceId = instanceId }
+            }
+        });
+
+        await Task.Delay(500);
+
+        var state = await client.GetOrchestrationStateAsync(instanceId, null);
+
+        Assert.NotNull(state);
+        Assert.NotNull(state.Tags);
+        Assert.Empty(state.Tags);
     }
 
     private static async Task<bool> IsDatabaseAvailableAsync()

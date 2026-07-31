@@ -33,6 +33,39 @@ Project file:
 - PostgreSQL schema + logic scripts shipped with the package
 - Integration-test coverage for core orchestration flows
 
+## Feature support & known limitations
+
+This is a port in progress toward parity with the
+[microsoft/durabletask-mssql](https://github.com/microsoft/durabletask-mssql)
+1.x reference. To set expectations clearly:
+
+**Supported and integration-tested:**
+- Create / get-state / get-history for orchestrations
+- Activity execution (schedule + complete)
+- Durable timers
+- ContinueAsNew (orchestration loops with a new execution id)
+- Sub-orchestration (nested orchestrations with result propagation)
+- External events raised via the client, with the orchestrator waiting via the `OnEvent` pattern
+- Purge by filter and by instance id
+- Orchestration query (`GetOrchestrationWithQueryAsync`)
+- Multi-tenancy via task hubs (`TaskHubName`)
+- Concurrent-deploy safety (schema creation retries on contention)
+
+**Known limitations (not yet at parity):**
+- **Durable entities**: not implemented (the MSSQL provider's entity feature has
+  no PostgreSQL equivalent yet). Tracked for 1.1.0.
+- **Schema migrations**: forward migrations are supported. The baseline
+  (`schema.postgresql.sql`) is applied idempotently for fresh installs; subsequent
+  upgrades are applied from embedded `Scripts/migrations/migration-{semver}.postgresql.sql`
+  resources in semantic-version order, each recorded in `dt.versions`. Migrations must
+  use idempotent DDL (`ADD COLUMN IF NOT EXISTS`, `CREATE TYPE IF NOT EXISTS`, etc.).
+- **Tags**: `OrchestrationState.Tags` is a non-null empty dictionary but tags are
+  not persisted (no schema column).
+- **Least-privilege role**: no `dt_runtime`-style role/`GRANT` model yet; connect
+  with a user that can create the schema.
+
+If any of the above is a blocker for your use case, please open an issue.
+
 ## Quick start
 
 Install package:
