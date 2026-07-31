@@ -5,7 +5,7 @@
 -- PostgreSQL port of DurableTask.SqlServer logic.sql
 --
 -- Target: PostgreSQL 17+
--- Version: 0.1.0-poc
+-- Version: 1.0.0
 
 -- =============================================================================
 -- CORE LIFECYCLE OPERATIONS
@@ -267,7 +267,10 @@ BEGIN
                 'payloadText', p.text,
                 'payloadId', n.payload_id,
                 'waitTimeSeconds', EXTRACT(EPOCH FROM (v_now - n."timestamp"))::INTEGER,
-                'traceContext', n.trace_context
+                'traceContext', n.trace_context,
+                -- Required so the runtime can populate ParentInstance on the ExecutionStarted new
+                -- event (the first execution of a sub-orchestration has no history, only new events).
+                'parentInstanceId', v_parent_instance_id
             ) ORDER BY n.sequence_number
         ), '[]'::JSONB)
         FROM (
@@ -321,7 +324,11 @@ BEGIN
                         ELSE p.text
                     END,
                     'payloadId', h.data_payload_id,
-                    'traceContext', h.trace_context
+                    'traceContext', h.trace_context,
+                    -- Required for the runtime to populate OrchestrationRuntimeState.ParentInstance;
+                    -- without it, sub-orchestration completions are never emitted (the DTFx dispatcher
+                    -- only builds a SubOrchestrationInstanceCompletedEvent when ParentInstance != null).
+                    'parentInstanceId', v_parent_instance_id
                 ) AS hist_obj
             FROM dt.history h
             LEFT JOIN dt.payloads p ON

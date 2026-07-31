@@ -11,6 +11,7 @@ namespace DurableTask.PostgreSQL.Tests.Integration;
 /// <summary>
 /// Tests for work item abandon/release logging behavior (GitHub Issue #2).
 /// </summary>
+[Collection("integration")]
 public sealed class WorkItemLifecycleTests : IDisposable
 {
     private readonly List<LogEntry> _logs;

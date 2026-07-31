@@ -8,6 +8,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No changes yet.
 
+## [1.0.0] - 2026-07-30
+
+First stable release. The provider runs the full standalone DTFx lifecycle end-to-end — create,
+activity execution, durable timers, ContinueAsNew, sub-orchestration, external events, purge, query,
+multi-tenancy, and forward schema migrations — with the integration test suite running in CI
+against PostgreSQL 17. See the README "Feature support & known limitations" section for what is not
+yet at parity with the MSSQL reference (durable entities, least-privilege role, tags persistence).
+
+### Fixed
+- **`PurgeInstanceStateAsync(PurgeInstanceFilter)` crashed at runtime.** It called
+  `purge_instance_state_by_time` passing a status CSV string where the function expected a
+  `SMALLINT`, throwing `PostgresException (invalid input syntax for type smallint)`. It now mirrors
+  the MSSQL provider: collects matching instance IDs via the paginated query, then deletes them in
+  batches. Status-set filtering (multiple statuses) is now supported.
+- **`GetOrchestrationWithQueryAsync` and `GetManyOrchestrationsAsync` could fail with
+  `42883: function ... does not exist`.** Parameters were sent untyped (`integer`/`text`/
+  `timestamp without time zone`), which did not resolve the `query_many_orchestrations` overload.
+  Parameters are now typed explicitly (`SMALLINT`/`VARCHAR`/`TIMESTAMPTZ`) and `DateTime` values are
+  normalized to UTC.
+- **History-event timestamps materialized from JSON had `DateTimeKind != Utc`** (GitHub #3). The
+  DTFx v2 gRPC sidecar's `Timestamp.FromDateTime` requires UTC and threw. Timestamps are now
+  normalized to UTC on materialization (`HistoryEvent.Timestamp`, `TimerCreatedEvent.FireAt`,
+  `TimerFiredEvent.FireAt`, `DistributedTraceContext.ActivityStartTime`).
+- **`OrchestrationState.Tags` was `null`** (GitHub #3), causing `ArgumentNullException` in consumers
+  that copy tags into a non-null collection. It now defaults to an empty dictionary. (Tags are not
+  yet persisted — see limitations.)
+- **Concurrent schema deployment could deadlock / unique-violate** (`23505`/`40P01`) when multiple
+  service instances or parallel test classes started against the same database. `DeploySchemaAsync`
+  now retries on these SQLSTATEs since the scripts are idempotent.
+- **Sub-orchestration never completed** — the parent stayed Running forever. Two root causes: (1)
+  the `lock_next_orchestration` history/new-event JSON omitted `parentInstanceId`, so
+  `OrchestrationRuntimeState.ParentInstance` was null and the runtime never emitted a
+  `SubOrchestrationInstanceCompletedEvent`; and (2) the leaf's `ExecutionStarted` row was written
+  with `task_id = -1` (ExecutionStarted's own EventId is always -1), so the runtime read
+  `ParentInstance.TaskScheduleId = -1` and built the completion with `TaskScheduledId = -1`, which
+  matched no pending `SubOrchestrationInstanceCreated`. The parent link is now propagated and
+  `GetTaskEventId` persists the parent's schedule id for `ExecutionStarted`. Sub-orchestration now
+  works end-to-end.
+- **`CompleteTaskOrchestrationWorkItemAsync` filtered inter-orchestration messages to
+  `ExecutionStartedEvent`**, dropping sub-orchestration completions. All orchestrator-emitted
+  messages are now forwarded, mirroring the MSSQL provider.
+- **ContinueAsNew was not honored** — the orchestration completed on its first execution instead
+  of re-activating with the next input/execution id. The `continuedAsNewMessage` is now routed
+  through `checkpoint_orchestration`, which detects the execution-id change and re-activates the
+  instance. ContinueAsNew now works end-to-end.
+- **Querying orchestrations by task hub name now throws `NotSupportedException`** explicitly
+  (mirrors MSSQL) instead of silently ignoring the filter.
+
+### Changed
+- Schema version string bumped from `0.1.0-poc` to `1.0.0` to match the package version.
+- Removed unused helpers (`AddArrayParameter`, `ExecuteNonQueryAsync`, `ExecuteReaderAsync`) and
+  stale internal documentation that described a long-superseded POC.
+
+### Added
+- **Forward schema migrations.** The baseline schema is applied idempotently; subsequent upgrades
+  are applied from embedded `Scripts/migrations/migration-{semver}.postgresql.sql` resources in
+  semantic-version order, each recorded in `dt.versions`. Enables a clean 1.0.0 → 1.x upgrade path.
+- Integration test coverage for activity execution, durable timers, sub-orchestration, ContinueAsNew,
+  external events (via the DTFx `OnEvent` + `TaskCompletionSource` pattern — DTFx has no built-in
+  `WaitForExternalEvent<T>()`), purge-by-filter, orchestration query, non-null `Tags`, end-to-end
+  orchestration completion, and the migration runner.
+- Unit coverage for `PostgreSqlUtils.GetHistoryEvent` UTC materialization.
+- A GitHub Actions workflow (`.github/workflows/tests.yml`) that runs the test suite against a
+  `postgres:17` service container.
+- `AGENTS.md` documenting the local upstream sources (DTFx core, MSSQL provider) used as the porting
+  reference.
+
+### Tests
+- Integration tests now each use a unique task hub to avoid cross-class instance residue, and run
+  serialized via an xUnit collection.
+
+### Known limitations (documented in README; tracked for 1.1.0 as #4 and #5)
+- Durable entities (#4), a least-privilege role model with a `SECURITY DEFINER` audit (#5), and tags
+  persistence are not yet at parity with the MSSQL reference. See the README "Feature support &
+  known limitations" section.
+
+
+
 ## [1.0.0-alpha.3] - 2026-07-04
 
 ### Fixed
