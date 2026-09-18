@@ -6,7 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No changes yet.
+### Fixed
+- **`OrchestrationState.CompletedTime` / `CreatedTime` / `LastUpdatedTime` had
+  `DateTimeKind.Unspecified` when the underlying column was NULL** (GitHub #8, residue of #3).
+  The reader already normalized non-NULL values to UTC, but the NULL fallback used
+  `default(DateTime)`, whose `Kind` is `Unspecified`, so the DTFx v2 gRPC sidecar's
+  `Timestamp.FromDateTime` threw `ArgumentException`. Since `completed_time` is NULL by design for
+  every non-terminal instance, this affected any read of a Running, Pending, or Suspended
+  orchestration — `GetOrchestrationStateAsync` (both overloads), `WaitForOrchestrationAsync`, and
+  the query paths. The fallback now carries an explicit UTC kind while keeping the same ticks, so
+  existing `== default` checks are unaffected.
 
 ## [1.0.0] - 2026-07-30
 
