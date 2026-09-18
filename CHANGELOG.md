@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No changes yet.
+
+## [1.0.1] - 2026-09-18
+
 ### Fixed
 - **`OrchestrationState.CompletedTime` / `CreatedTime` / `LastUpdatedTime` had
   `DateTimeKind.Unspecified` when the underlying column was NULL** (GitHub #8, residue of #3).
