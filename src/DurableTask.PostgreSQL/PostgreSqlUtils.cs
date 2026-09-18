@@ -242,10 +242,14 @@ static class PostgreSqlUtils
 
         var state = new OrchestrationState
         {
-            CompletedTime = GetUtcDateTime(reader, "completed_time") ?? default,
-            CreatedTime = GetUtcDateTime(reader, "created_time") ?? default,
+            // NULL columns fall back to UnsetUtcTimestamp, not default(DateTime): the latter is
+            // DateTimeKind.Unspecified and breaks Utc-requiring consumers. completed_time is NULL
+            // by design for every non-terminal orchestration (see logic.postgresql.sql:
+            // completed_time = CASE WHEN v_is_completed THEN NOW() ELSE NULL END).
+            CompletedTime = GetUtcDateTime(reader, "completed_time") ?? UnsetUtcTimestamp,
+            CreatedTime = GetUtcDateTime(reader, "created_time") ?? UnsetUtcTimestamp,
             Input = GetJsonStringOrNull(reader, "input_text"),
-            LastUpdatedTime = GetUtcDateTime(reader, "last_updated_time") ?? default,
+            LastUpdatedTime = GetUtcDateTime(reader, "last_updated_time") ?? UnsetUtcTimestamp,
             Name = GetStringOrNull(reader, "name"),
             Version = GetStringOrNull(reader, "version"),
             OrchestrationInstance = new OrchestrationInstance
@@ -408,6 +412,15 @@ static class PostgreSqlUtils
         
         return value?.ToString();
     }
+
+    /// <summary>
+    /// Sentinel for an absent <see cref="OrchestrationState"/> timestamp. Same ticks as
+    /// <c>default(DateTime)</c> (so existing <c>== default</c> comparisons still hold) but with
+    /// an explicit <see cref="DateTimeKind.Utc"/>: <c>default(DateTime).Kind</c> is
+    /// <see cref="DateTimeKind.Unspecified"/>, which makes consumers that require Utc — notably
+    /// <c>Timestamp.FromDateTime</c> in the DTFx v2 gRPC sidecar — throw <see cref="ArgumentException"/>.
+    /// </summary>
+    internal static readonly DateTime UnsetUtcTimestamp = new(0L, DateTimeKind.Utc);
 
     static DateTime? GetUtcDateTime(NpgsqlDataReader reader, string columnName)
     {
