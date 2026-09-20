@@ -19,6 +19,12 @@ namespace DurableTask.PostgreSQL;
 /// </summary>
 public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrchestrationServiceClient, IDisposable
 {
+    /// <summary>
+    /// The schema name the embedded SQL scripts are authored against. Deployments into a
+    /// different schema rewrite this token; see <see cref="RewriteSchemaName"/>.
+    /// </summary>
+    private const string DefaultSchemaName = "dt";
+
     private readonly PostgreSqlOrchestrationServiceSettings _settings;
     private readonly ILogger<PostgreSqlOrchestrationService> _logger;
     private readonly NpgsqlDataSource _dataSource;
@@ -1328,31 +1334,109 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         await using var connection = new NpgsqlConnection(connectionBuilder.ConnectionString);
         await connection.OpenAsync().ConfigureAwait(false);
 
-        // Concurrent deployments (parallel test classes, or multiple service instances
-        // starting against the same DB) can race on CREATE SCHEMA: two transactions both
-        // see the schema as missing, one wins, and the loser hits either a unique-violation
-        // on pg_namespace (23505) or a deadlock (40P01). Both mean "another transaction is
-        // creating/upgrading the schema" — since the scripts are idempotent, a retry succeeds.
-        const int maxAttempts = 5;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        // Concurrent deployments (parallel test classes, or multiple service instances starting
+        // against the same DB) race on the DDL: two transactions both see the schema as missing,
+        // and they collide on catalog locks — surfacing as a unique violation on pg_namespace /
+        // pg_type (23505) or, more often with three or more racers, a deadlock (40P01).
+        //
+        // Retrying that collision does not work: the racers back off by the same amount and
+        // return still aligned. Instead we serialize the whole deploy behind a session-scoped
+        // advisory lock, mirroring how the SQL Server provider wraps its schema upgrade in
+        // sys.sp_getapplock (DurableTask.SqlServer, SqlDbManager.AcquireDatabaseLockAsync).
+        // Losers block until the winner finishes, then find the schema already in place and
+        // no-op through the idempotent scripts.
+        //
+        // The lock is session-scoped rather than transaction-scoped because the deploy spans
+        // several transactions (schema+logic, then one per migration); a transaction-scoped
+        // lock would be released at the first commit and reopen the race for the migrations.
+        await AcquireDeploymentLockAsync(connection).ConfigureAwait(false);
+        try
         {
-            try
-            {
-                await DeploySchemaScriptsAsync(connection, schemaSql, logicSql).ConfigureAwait(false);
-                await ApplyMigrationsAsync(connection).ConfigureAwait(false);
-                break;
-            }
-            catch (PostgresException ex) when (
-                (ex.SqlState == PostgresErrorCodes.UniqueViolation ||
-                 ex.SqlState == "40P01") &&
-                attempt < maxAttempts)
-            {
-                _logger.LogWarning(ex, "Concurrent schema deployment detected (attempt {Attempt}/{Max}); retrying", attempt, maxAttempts);
-                await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), CancellationToken.None).ConfigureAwait(false);
-            }
+            await DeploySchemaScriptsAsync(connection, schemaSql, logicSql).ConfigureAwait(false);
+            await ApplyMigrationsAsync(connection).ConfigureAwait(false);
+        }
+        finally
+        {
+            await ReleaseDeploymentLockAsync(connection).ConfigureAwait(false);
         }
 
         _logger.LogInformation("Schema '{SchemaName}' deployed successfully", _settings.SchemaName);
+    }
+
+    /// <summary>
+    /// Takes the advisory lock that serializes schema deployment for this schema. Blocks until the
+    /// lock is available, so concurrent first-deploys queue instead of deadlocking.
+    /// </summary>
+    private async Task AcquireDeploymentLockAsync(NpgsqlConnection connection)
+    {
+        long lockKey = GetDeploymentLockKey(_settings.SchemaName);
+
+        await using var cmd = new NpgsqlCommand("SELECT pg_advisory_lock($1)", connection);
+        cmd.Parameters.AddWithValue(lockKey);
+
+        // No CommandTimeout: waiting is the desired behavior here. A deploy that is genuinely
+        // stuck surfaces through the connection timeout rather than by failing fast on a
+        // healthy-but-slow peer.
+        cmd.CommandTimeout = 0;
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+        stopwatch.Stop();
+
+        _logger.LogDebug(
+            "Acquired schema deployment lock {LockKey} for schema '{SchemaName}' after {ElapsedMs}ms",
+            lockKey,
+            _settings.SchemaName,
+            stopwatch.ElapsedMilliseconds);
+    }
+
+    /// <summary>
+    /// Releases the schema deployment advisory lock. Session-scoped advisory locks are also
+    /// released when the connection closes, so a failure here is logged rather than thrown —
+    /// it must not mask the deployment exception it may be unwinding.
+    /// </summary>
+    private async Task ReleaseDeploymentLockAsync(NpgsqlConnection connection)
+    {
+        long lockKey = GetDeploymentLockKey(_settings.SchemaName);
+
+        try
+        {
+            await using var cmd = new NpgsqlCommand("SELECT pg_advisory_unlock($1)", connection);
+            cmd.Parameters.AddWithValue(lockKey);
+            await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+        {
+            // The connection is closed or broken; PostgreSQL has already dropped the lock with
+            // the session. Nothing to recover, and throwing would hide the original failure.
+            _logger.LogWarning(
+                ex,
+                "Failed to explicitly release schema deployment lock {LockKey}; it is released with the session",
+                lockKey);
+        }
+    }
+
+    /// <summary>
+    /// Derives the advisory lock key from the schema name, so task hubs deployed into different
+    /// schemas of the same database do not serialize against each other. Uses FNV-1a (a stable,
+    /// process-independent hash) because <see cref="string.GetHashCode()"/> is randomized per
+    /// process and would give each worker a different key.
+    /// </summary>
+    internal static long GetDeploymentLockKey(string schemaName)
+    {
+        // Namespace the key so it cannot collide with advisory locks taken by application code
+        // that happens to use a small integer key.
+        const ulong offsetBasis = 14695981039346656037;
+        const ulong prime = 1099511628211;
+
+        ulong hash = offsetBasis;
+        foreach (char c in "DurableTask.PostgreSQL:schema-deploy:" + schemaName)
+        {
+            hash ^= c;
+            hash *= prime;
+        }
+
+        return unchecked((long)hash);
     }
 
     private static async Task DeploySchemaScriptsAsync(NpgsqlConnection connection, string schemaSql, string logicSql)
@@ -1504,15 +1588,30 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
     private string RewriteSchemaName(string sql)
     {
-        // Rewrite default schema qualifier "dt." and the schema creation statement
-        // to use the configured schema name. This keeps the embedded scripts stable
-        // while allowing consumers to choose any valid PostgreSQL identifier.
-        sql = sql.Replace("dt.", $"{_settings.SchemaName}.", StringComparison.Ordinal);
-        sql = sql.Replace(
-            "CREATE SCHEMA IF NOT EXISTS dt;",
-            $"CREATE SCHEMA IF NOT EXISTS {_settings.SchemaName};",
-            StringComparison.Ordinal);
-        return sql;
+        // Rewrite the default schema name "dt" to the configured one, keeping the embedded
+        // scripts stable while allowing consumers to choose any valid PostgreSQL identifier.
+        //
+        // This matches "dt" as a whole identifier, which covers every form the scripts use:
+        // the qualifier ("dt.instances"), the CREATE SCHEMA statement, and bare references
+        // such as "COMMENT ON SCHEMA dt". Matching only "dt." used to miss the last one, so a
+        // non-default SchemaName deployed a schema and then failed with 3F000 trying to comment
+        // on a "dt" that was never created.
+        //
+        // The lookarounds keep identifiers that merely contain "dt" intact: the lookbehind
+        // rejects a preceding word character or "." (so "created_dt" and an already-qualified
+        // "other.dt" are left alone), and the lookahead rejects a trailing word character
+        // ("dt_other"). A following "." is allowed, which is what rewrites the qualifier.
+        if (string.Equals(_settings.SchemaName, DefaultSchemaName, StringComparison.Ordinal))
+        {
+            return sql;
+        }
+
+        return System.Text.RegularExpressions.Regex.Replace(
+            sql,
+            $@"(?<![\w.]){DefaultSchemaName}(?![\w])",
+            _settings.SchemaName,
+            System.Text.RegularExpressions.RegexOptions.None,
+            TimeSpan.FromSeconds(5));
     }
 
     /// <inheritdoc cref="IOrchestrationService.StopAsync(bool)" />

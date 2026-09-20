@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No changes yet.
 
+## [1.0.2] - 2026-09-20
+
+### Fixed
+- **Concurrent first deploy against a fresh database failed with a deadlock (40P01) or a unique
+  violation (23505)** (GitHub #10). Several workers starting at once — multiple replicas with
+  `AutoDeploySchema = true`, or parallel test hosts — each ran `DeploySchemaAsync` against the same
+  empty catalog and collided on catalog locks. The previous defense was a retry loop, which could
+  not converge: every racer backed off by the same fixed interval (`200ms * attempt`) and returned
+  still aligned. The deploy is now serialized behind a session-scoped PostgreSQL advisory lock
+  keyed on the schema name, mirroring the SQL Server provider's `sp_getapplock` approach
+  (`DurableTask.SqlServer`, `SqlDbManager.AcquireDatabaseLockAsync`). Losing workers block until
+  the winner finishes and then no-op through the idempotent scripts. The lock is session-scoped,
+  not transaction-scoped, because the deploy spans several transactions (schema+logic, then one
+  per migration); the lock key is derived from `SchemaName` via a process-stable FNV-1a hash, so
+  task hubs in different schemas of one database do not serialize against each other.
+- **A failed schema deployment could be reported as successful.** The retry loop exited without
+  rethrowing when every attempt failed, so `DeploySchemaAsync` fell through to logging
+  `Schema '...' deployed successfully` and startup continued against an incomplete schema. The
+  failure then surfaced later as an unrelated missing-table or composite-type error. Removing the
+  loop in favor of the advisory lock lets deployment exceptions propagate from `CreateAsync`.
+- **A non-default `SchemaName` failed to deploy with `3F000: schema "dt" does not exist`.**
+  `RewriteSchemaName` rewrote the `dt.` qualifier and the `CREATE SCHEMA` statement, but not bare
+  schema references — `COMMENT ON SCHEMA dt` (schema.postgresql.sql:287) was left pointing at a
+  schema that was never created. The rewrite now matches `dt` as a whole identifier, covering
+  every form the scripts use while leaving identifiers that merely contain `dt` untouched.
+
 ## [1.0.1] - 2026-09-18
 
 ### Fixed
