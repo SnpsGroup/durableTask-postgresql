@@ -91,6 +91,28 @@ services.AddDurableTaskPostgreSql(new PostgreSqlOrchestrationServiceSettings
 });
 ```
 
+## Polling and backoff
+
+The provider polls PostgreSQL for work. When a poll finds nothing, it waits before trying again,
+using randomized exponential backoff between `MinWorkItemPollingInterval` and
+`WorkItemPollingInterval`. This matters because each poll runs as a transaction that commits even
+when it returns no rows, so polling without a delay inflates `pg_stat_database.xact_commit` and
+puts needless load on the server while the task hub is idle.
+
+The backoff does not delay real work: creating an instance, raising an external event, completing
+an activity, or checkpointing an orchestration that enqueued work all signal the relevant poller,
+which wakes immediately and resets to the minimum interval.
+
+| Setting | Default | Purpose |
+| ------- | ------- | ------- |
+| `MinWorkItemPollingInterval` | 50 ms | Delay after the first poll that finds no work, and the interval returned to once work appears. |
+| `WorkItemPollingInterval` | 1 s | Upper bound. An idle worker settles here (one poll per interval, per dispatcher). |
+| `DeltaBackoffWorkItemPollingInterval` | 50 ms | Growth increment applied as successive polls come back empty. |
+
+Raise `WorkItemPollingInterval` to reduce load from idle workers; lower
+`MinWorkItemPollingInterval` to shave latency on a busy task hub. `MinWorkItemPollingInterval`
+must not exceed `WorkItemPollingInterval` — the constructor rejects that combination.
+
 ## Database scripts
 
 The provider ships SQL scripts at:

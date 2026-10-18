@@ -6,7 +6,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No changes yet.
+### Fixed
+- **An idle worker polled the database continuously, producing hundreds of commits per second
+  against an empty queue.** `WorkItemPollingInterval` was declared on
+  `PostgreSqlOrchestrationServiceSettings` but never read by any code path, and neither
+  `LockNextTaskOrchestrationWorkItemAsync` nor `LockNextTaskActivityWorkItem` honored the
+  `receiveTimeout` the DTFx dispatcher passes. Both returned `null` the moment
+  `lock_next_orchestration` / `lock_next_task` found no work, and the dispatcher re-polled
+  immediately — a busy-wait running as fast as PostgreSQL could answer. Because each call is an
+  implicit transaction that commits even when it returns zero rows, every empty poll incremented
+  `pg_stat_database.xact_commit`; an idle task hub accumulated billions of commits over weeks.
+
+  Both lock methods now poll in a loop bounded by `receiveTimeout`, waiting between empty polls
+  with randomized exponential backoff (`BackoffPollingHelper`, ported from the SQL Server
+  provider) that grows from `MinWorkItemPollingInterval` to `WorkItemPollingInterval`. Paths that
+  enqueue work — checkpoint, activity completion, instance creation and external events — signal
+  the affected poller so the backoff adds no latency to real work.
+
+  Measured on an idle worker against a local PostgreSQL 17: **463.6 commits/s before, 4.5
+  commits/s after** (a ~100x reduction), with no measurable change to orchestration latency.
+
+### Added
+- `PostgreSqlOrchestrationServiceSettings.MinWorkItemPollingInterval` (default 50 ms) and
+  `DeltaBackoffWorkItemPollingInterval` (default 50 ms), the lower bound and growth increment for
+  work-item poll backoff. `WorkItemPollingInterval` (default 1 s, unchanged) is now the upper
+  bound and is actually honored. Invalid combinations (a negative interval, or a minimum above
+  the maximum) throw `ArgumentOutOfRangeException` from the service constructor rather than
+  failing on the first poll.
+
+### Changed
+- A failure while polling for work (`lock_next_orchestration` / `lock_next_task`) now propagates
+  out of the lock methods instead of being logged and reported as "no work available". The
+  DTFx dispatcher applies its `GetDelayInSecondsAfterOnFetchException` backoff to the failure;
+  previously a database outage was indistinguishable from an idle queue, so the new polling loop
+  would have retried and re-logged for the full 30 s receive timeout.
 
 ## [1.0.2] - 2026-09-20
 
