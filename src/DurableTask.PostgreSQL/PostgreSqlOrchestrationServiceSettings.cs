@@ -49,10 +49,29 @@ public sealed class PostgreSqlOrchestrationServiceSettings
     public TimeSpan LockTimeout { get; init; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Work item polling interval.
+    /// Upper bound for the work-item polling interval. When a dispatcher finds no work it
+    /// backs off exponentially from <see cref="MinWorkItemPollingInterval"/> toward this value,
+    /// so an idle task hub settles at one poll per interval instead of polling continuously.
+    /// A dispatcher that finds work (or is signaled by a checkpoint that enqueued work) resets
+    /// to the minimum immediately, so this does not add latency to a busy task hub.
     /// Default: 1 second
     /// </summary>
     public TimeSpan WorkItemPollingInterval { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Lower bound for the work-item polling interval — the delay after the first poll that
+    /// finds no work, and the interval a dispatcher returns to once work appears.
+    /// Must not be greater than <see cref="WorkItemPollingInterval"/>.
+    /// Default: 50 milliseconds
+    /// </summary>
+    public TimeSpan MinWorkItemPollingInterval { get; init; } = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// Increment applied to each successive empty poll while backing off from
+    /// <see cref="MinWorkItemPollingInterval"/> to <see cref="WorkItemPollingInterval"/>.
+    /// Default: 50 milliseconds
+    /// </summary>
+    public TimeSpan DeltaBackoffWorkItemPollingInterval { get; init; } = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
     /// Enable automatic schema deployment on startup.

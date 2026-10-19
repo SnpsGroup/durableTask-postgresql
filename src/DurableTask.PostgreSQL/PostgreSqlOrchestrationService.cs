@@ -30,6 +30,13 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     private readonly NpgsqlDataSource _dataSource;
     private readonly CancellationTokenSource _shutdownTokenSource = new();
 
+    // Idle-poll backoff, one per dispatcher. Both lock_next_* functions run as implicit
+    // transactions that commit even when they return no rows, so polling them in a tight loop
+    // burns thousands of commits per second against an empty queue. Mirrors the SQL Server
+    // provider's orchestration/activity BackoffPollingHelper pair.
+    private readonly BackoffPollingHelper _orchestrationBackoffHelper;
+    private readonly BackoffPollingHelper _activityBackoffHelper;
+
     /// <summary>
     /// Initializes a new instance of <see cref="PostgreSqlOrchestrationService"/> with the
     /// specified settings and logger. Constructs the Npgsql data source with composite type
@@ -43,6 +50,17 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+        // Invalid polling intervals are rejected here, by the backoff strategy's own argument
+        // validation, so a misconfiguration fails at construction rather than on the first poll.
+        _orchestrationBackoffHelper = new BackoffPollingHelper(
+            _settings.MinWorkItemPollingInterval,
+            _settings.WorkItemPollingInterval,
+            _settings.DeltaBackoffWorkItemPollingInterval);
+        _activityBackoffHelper = new BackoffPollingHelper(
+            _settings.MinWorkItemPollingInterval,
+            _settings.WorkItemPollingInterval,
+            _settings.DeltaBackoffWorkItemPollingInterval);
 
         // Propagate TaskHubName to PostgreSQL by setting it as the connection's
         // ApplicationName. The schema's current_task_hub() uses application_name
@@ -165,6 +183,57 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         TimeSpan receiveTimeout,
         CancellationToken cancellationToken)
     {
+        // Poll until work shows up or receiveTimeout elapses, backing off between empty polls.
+        // Returning null on the first empty result instead would hand control straight back to
+        // the DTFx dispatcher, which re-polls immediately — a busy-wait on an idle task hub.
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        bool isWaiting = false;
+
+        while (true)
+        {
+            // Capture the signal generation BEFORE polling: if a checkpoint enqueues work while
+            // this query is in flight, the generation moves and the wait below returns at once
+            // instead of sleeping on information that is already stale.
+            ulong generation = _orchestrationBackoffHelper.CurrentGeneration;
+
+            var workItem = await TryLockNextTaskOrchestrationWorkItemAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (workItem != null)
+            {
+                _orchestrationBackoffHelper.Reset();
+                return workItem;
+            }
+
+            if (stopwatch.Elapsed >= receiveTimeout || cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+
+            if (!isWaiting)
+            {
+                _logger.LogDebug("No orchestration work items found. Waiting for new work to appear.");
+                isWaiting = true;
+            }
+
+            try
+            {
+                await _orchestrationBackoffHelper.WaitAsync(generation, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return null; // Host is shutting down.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs a single <c>lock_next_orchestration</c> poll. Returns <c>null</c> when no work is
+    /// available (or the locked instance turned out to be in a terminal state).
+    /// </summary>
+    private async Task<TaskOrchestrationWorkItem?> TryLockNextTaskOrchestrationWorkItemAsync(
+        CancellationToken cancellationToken)
+    {
         try
         {
             var lockExpiration = DateTimeOffset.UtcNow.Add(_settings.LockTimeout);
@@ -276,8 +345,13 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Let the failure escape the polling loop. Swallowing it here would make a database
+            // outage indistinguishable from an empty queue, so the loop would retry for the full
+            // receiveTimeout (30s) and re-log on every attempt, while the dispatcher's
+            // GetDelayInSecondsAfterOnFetchException backoff never got a chance to apply.
+            // Mirrors the SQL Server provider, which rethrows out of its fetch loop.
             _logger.LogError(ex, "Error locking next orchestration work item");
-            return null;
+            throw;
         }
     }
 
@@ -296,6 +370,53 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     /// <inheritdoc cref="IOrchestrationService.LockNextTaskActivityWorkItem" />
     public async Task<TaskActivityWorkItem?> LockNextTaskActivityWorkItem(
         TimeSpan receiveTimeout,
+        CancellationToken cancellationToken)
+    {
+        // See LockNextTaskOrchestrationWorkItemAsync: back off between empty polls instead of
+        // returning null immediately and letting the dispatcher spin.
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        bool isWaiting = false;
+
+        while (true)
+        {
+            // See LockNextTaskOrchestrationWorkItemAsync on why the generation is read first.
+            ulong generation = _activityBackoffHelper.CurrentGeneration;
+
+            var workItem = await TryLockNextTaskActivityWorkItemAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (workItem != null)
+            {
+                _activityBackoffHelper.Reset();
+                return workItem;
+            }
+
+            if (stopwatch.Elapsed >= receiveTimeout || cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+
+            if (!isWaiting)
+            {
+                _logger.LogDebug("No activity work items found. Waiting for new work to appear.");
+                isWaiting = true;
+            }
+
+            try
+            {
+                await _activityBackoffHelper.WaitAsync(generation, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return null; // Host is shutting down.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs a single <c>lock_next_task</c> poll. Returns <c>null</c> when no work is available.
+    /// </summary>
+    private async Task<TaskActivityWorkItem?> TryLockNextTaskActivityWorkItemAsync(
         CancellationToken cancellationToken)
     {
         try
@@ -363,8 +484,11 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // See TryLockNextTaskOrchestrationWorkItemAsync: the failure must escape the polling
+            // loop so the dispatcher applies its fetch-exception backoff instead of this method
+            // spinning and log-flooding for the whole receiveTimeout.
             _logger.LogError(ex, "Error locking next task activity");
-            return null;
+            throw;
         }
     }
 
@@ -496,6 +620,18 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             }
 
             throw;
+        }
+
+        // Wake the pollers for work this checkpoint just enqueued, so the backoff interval
+        // never adds latency to work that is already waiting in the queue.
+        if (taskEvents.Count > 0)
+        {
+            _activityBackoffHelper.Reset();
+        }
+
+        if (orchestrationEvents.Count > 0)
+        {
+            _orchestrationBackoffHelper.Reset();
         }
 
         _logger.LogDebug(
@@ -761,6 +897,10 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
 
         var instance = workItem.TaskMessage.OrchestrationInstance;
+
+        // The activity result is now queued for its orchestration; poll for it immediately.
+        _orchestrationBackoffHelper.Reset();
+
         _logger.LogDebug(
             "Task activity completed for instance {InstanceId}",
             instance.InstanceId);
@@ -779,11 +919,17 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             connection);
         cmd.Parameters.AddWithValue(workItem.InstanceId);
         await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+
+        // The lock was just cleared to make this item immediately re-lockable; waking the poller
+        // is what actually makes the retry fast, instead of waiting out the backoff interval.
+        _orchestrationBackoffHelper.Reset();
     }
 
     /// <inheritdoc cref="IOrchestrationService.AbandonTaskActivityWorkItem" />
     public Task AbandonTaskActivityWorkItem(TaskActivityWorkItem workItem)
     {
+        // The activity lock is left to expire rather than cleared (see the SQL Server provider's
+        // note on lazy abandon), so there is nothing to wake a poller for yet.
         _logger.LogWarning("Abandoning activity work item {Id} (will retry)", workItem.Id);
         return Task.CompletedTask;
     }
@@ -913,6 +1059,10 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         cmd.Parameters.AddWithValue(traceContext ?? (object)DBNull.Value);
 
         await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+
+        // An external event is now queued for this instance; wake the orchestration poller
+        // rather than making the event wait out the current backoff interval.
+        _orchestrationBackoffHelper.Reset();
 
         _logger.LogDebug(
             "Sent message to orchestration {InstanceId}, event type={EventType}",
@@ -1194,6 +1344,10 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
         await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
 
+        // terminate_instance enqueues an ExecutionTerminated event in dt.new_events, which is
+        // orchestration work; wake the poller so termination is not delayed by the backoff.
+        _orchestrationBackoffHelper.Reset();
+
         _logger.LogInformation("Terminated orchestration {InstanceId}, reason={Reason}", instanceId, reason);
     }
 
@@ -1260,7 +1414,13 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
 
         cmd.Parameters.AddWithValue(SerializeTraceContext(startEvent.ParentTraceContext) ?? (object)DBNull.Value);
-        return await cmd.ExecuteScalarAsync().ConfigureAwait(false) as string;
+        var createdInstanceId = await cmd.ExecuteScalarAsync().ConfigureAwait(false) as string;
+
+        // A new instance is waiting to be picked up; collapse the poller's backoff so start
+        // latency stays at the minimum interval instead of the current backoff.
+        _orchestrationBackoffHelper.Reset();
+
+        return createdInstanceId;
     }
 
     private static JsonElement ToJsonElement(string payloadText)
