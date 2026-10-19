@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-10-19
+
 ### Fixed
 - **An idle worker polled the database continuously, producing hundreds of commits per second
   against an empty queue.** `WorkItemPollingInterval` was declared on
