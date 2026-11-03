@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-03
+
 ### Fixed
 - **An event delivered to an orchestration that had already completed threw
   `NpgsqlOperationInProgressException` and left the instance permanently stuck, re-failing on
