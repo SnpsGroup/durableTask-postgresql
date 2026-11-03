@@ -18,6 +18,7 @@
 -- dependent objects (e.g. comments), which are re-added below.
 DROP FUNCTION IF EXISTS dt.create_instance CASCADE;
 DROP FUNCTION IF EXISTS dt.lock_next_orchestration CASCADE;
+DROP FUNCTION IF EXISTS dt.discard_events_and_unlock_instance CASCADE;
 DROP FUNCTION IF EXISTS dt.lock_next_task CASCADE;
 DROP FUNCTION IF EXISTS dt.query_single_orchestration CASCADE;
 DROP FUNCTION IF EXISTS dt.renew_orchestration_locks CASCADE;
@@ -354,6 +355,50 @@ END;
 $$;
 
 COMMENT ON FUNCTION dt.lock_next_orchestration IS 'Dequeue next orchestration work item with SKIP LOCKED for concurrency';
+
+-- Function: dt.discard_events_and_unlock_instance
+-- Purpose: Drop the pending events of an instance that can never process them again (its
+--          runtime_status is terminal) and release the lock taken by lock_next_orchestration.
+--          Without the delete the instance keeps satisfying lock_next_orchestration's
+--          "has pending events" join, so every poll re-locks and re-discards it forever.
+--          Events are deleted by instance_id, not by the sequence numbers of the batch that
+--          was read: a terminal instance never replays, so residual events have no reader.
+--          Payloads are intentionally left to the purge path, matching checkpoint_orchestration,
+--          which also deletes new_events without touching their payload rows.
+-- Parameters:
+--   p_instance_id: Instance to discard events for and unlock
+-- Returns: Number of discarded events
+CREATE OR REPLACE FUNCTION dt.discard_events_and_unlock_instance(
+    p_instance_id VARCHAR(100)
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_task_hub VARCHAR(50);
+    v_events_deleted INTEGER;
+BEGIN
+    v_task_hub := dt.current_task_hub();
+
+    -- *** IMPORTANT ***
+    -- Maintain consistent table access order to prevent deadlocks
+    -- Table order: Instances → NewEvents (same order as lock_next_orchestration)
+    UPDATE dt.instances
+    SET locked_by = NULL,
+        lock_expiration = NULL
+    WHERE task_hub = v_task_hub
+      AND instance_id = p_instance_id;
+
+    DELETE FROM dt.new_events
+    WHERE task_hub = v_task_hub
+      AND instance_id = p_instance_id;
+
+    GET DIAGNOSTICS v_events_deleted = ROW_COUNT;
+    RETURN v_events_deleted;
+END;
+$$;
+
+COMMENT ON FUNCTION dt.discard_events_and_unlock_instance IS 'Discard unreachable events of a terminal instance and release its lock, atomically';
 
 -- Function: dt.lock_next_task
 -- Purpose: Dequeue next activity task work item (CRITICAL for activity workers)
