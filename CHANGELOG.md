@@ -6,6 +6,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An event delivered to an orchestration that had already completed threw
+  `NpgsqlOperationInProgressException` and left the instance permanently stuck, re-failing on
+  every poll** ([#13](https://github.com/SnpsGroup/durableTask-postgresql/issues/13)). Two
+  defects compounded on the discard path in `TryLockNextTaskOrchestrationWorkItemAsync`:
+
+  The reader returned by `lock_next_orchestration` was scoped to the whole method, so when the
+  locked instance turned out to be in a terminal state, the discard ran a second command on the
+  same connection while that reader was still open. Npgsql permits only one active command per
+  connection, hence the exception. The reader is now scoped to the block that reads from it and
+  is closed before the discard runs.
+
+  More seriously, the discard only cleared the lock (`UPDATE instances SET locked_by = NULL`) and
+  never deleted the queued events. Nothing else deletes them either — `checkpoint_orchestration`
+  is the only automatic path that does, and it cannot run for a terminal instance — so the
+  instance kept satisfying `lock_next_orchestration`'s "has pending events" join and was
+  re-locked and re-discarded on every poll, indefinitely. Fixing only the exception would have
+  turned the crash into a silent `LogWarning` loop with constant database load. The discard now
+  calls the new `dt.discard_events_and_unlock_instance`, which deletes the instance's queued
+  events and releases the lock in a single statement pair, mirroring the SQL Server provider's
+  `_DiscardEventsAndUnlockInstance`.
+
+  Any orchestration using the timeout pattern could hit this — `context.CreateTimer` raced
+  against work with `Task.WhenAny`, where the work winning leaves the `TimerFired` event queued
+  after the orchestration has already completed.
+
+  Reported by [@jason-dos-santos](https://github.com/jason-dos-santos), who diagnosed both the
+  reader scope and the missing event deletion.
+
+### Added
+- `dt.discard_events_and_unlock_instance(p_instance_id)`, which deletes the queued events of an
+  instance in a terminal state and releases its lock. Purely additive to `logic.postgresql.sql`,
+  which drops and recreates all routines on deploy — no schema migration is required.
+
 ## [1.0.3] - 2026-10-19
 
 ### Fixed

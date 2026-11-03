@@ -247,23 +247,34 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             cmd.Parameters.AddWithValue(_settings.WorkerId);
             cmd.Parameters.AddWithValue(lockExpiration);
 
-            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            string instanceId;
+            string executionId;
+            string runtimeStatus;
+            string newEventsJson;
+            string historyJson;
 
-            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            // Scoped so the reader is closed before the discard path below runs another command
+            // on this same connection: Npgsql allows only one active command per connection, so
+            // keeping the reader open until the end of the method threw
+            // NpgsqlOperationInProgressException. Everything after this block reads local state.
+            await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             {
-                return null; // No work available
+                if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    return null; // No work available
+                }
+
+                instanceId = reader.GetString(reader.GetOrdinal("instance_id"));
+                executionId = reader.GetString(reader.GetOrdinal("execution_id"));
+                runtimeStatus = reader.GetString(reader.GetOrdinal("runtime_status"));
+                newEventsJson = reader.GetString(reader.GetOrdinal("new_events"));
+                historyJson = reader.GetString(reader.GetOrdinal("history"));
             }
 
-            var instanceId = reader.GetString(reader.GetOrdinal("instance_id"));
-            var executionId = reader.GetString(reader.GetOrdinal("execution_id"));
-            var runtimeStatus = reader.GetString(reader.GetOrdinal("runtime_status"));
-
             // Parse new events JSON
-            var newEventsJson = reader.GetString(reader.GetOrdinal("new_events"));
             var newEventsArray = JsonSerializer.Deserialize<JsonElement[]>(newEventsJson) ?? [];
 
             // Parse history JSON
-            var historyJson = reader.GetString(reader.GetOrdinal("history"));
             var historyArray = JsonSerializer.Deserialize<JsonElement[]>(historyJson) ?? [];
 
             _logger.LogDebug(
@@ -325,12 +336,18 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
                     "Target orchestration {InstanceId} is in {Status} state. Discarding {EventCount} events.",
                     instanceId, runtimeStatus, messages.Count);
 
-                // Discard events and release lock
+                // Delete the events along with releasing the lock. Only clearing the lock left the
+                // events queued, so the instance stayed eligible for lock_next_orchestration and
+                // was re-locked and re-discarded on every poll, forever.
                 await using var discardCmd = new NpgsqlCommand(
-                    $"UPDATE {_settings.SchemaName}.instances SET locked_by = NULL, lock_expiration = NULL WHERE instance_id = $1",
+                    $"SELECT {_settings.SchemaName}.discard_events_and_unlock_instance($1)",
                     connection);
                 discardCmd.Parameters.AddWithValue(instanceId);
-                await discardCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                var discardedEvents = await discardCmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+
+                _logger.LogDebug(
+                    "Discarded {DiscardedCount} queued events for terminal orchestration {InstanceId}",
+                    discardedEvents, instanceId);
 
                 return null;
             }
