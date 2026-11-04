@@ -6,6 +6,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-04
+
+### Added
+- **`PostgreSqlOrchestrationServiceSettings.ConfigureDataSource`** — an optional
+  `Action<NpgsqlDataSourceBuilder>` that configures the Npgsql data source the provider builds
+  ([#7](https://github.com/SnpsGroup/durableTask-postgresql/issues/7)). This reaches Npgsql
+  features a connection string cannot express: `UsePasswordProvider` /
+  `UsePeriodicPasswordProvider` for rotating-token auth (AWS RDS IAM, Azure Entra), client
+  certificates, `UseLoggerFactory`, `ConfigureTracing`, and
+  `UsePhysicalConnectionInitializer`. Requested by
+  [@Clockwork-Muse](https://github.com/Clockwork-Muse).
+
+  Additive and backward compatible: leaving it unset reproduces 1.0.4 behavior exactly.
+
+  The callback runs after the connection string is applied and **before** the provider
+  registers its composite type mappings and re-applies `TaskHubName` as `ApplicationName`, so
+  provider requirements take precedence. The `ApplicationName` re-assert matters because under
+  the default `TaskHubMode = '0'` the schema's `current_task_hub()` reads `application_name` —
+  without it, a shared host configuration helper setting `ApplicationName` to the application's
+  name would silently route work to a different task hub, with no exception and instances
+  simply never progressing.
+
+  Treat `ConfigureDataSource` as a trusted extension point, not a sandbox: it runs as the host
+  application, which already owns the connection string. Keys the provider does not re-apply —
+  notably `Database`, `Host` and `SearchPath` — do take effect.
+
+  The issue also asked for the provider to accept a **pre-built `NpgsqlDataSource`**, which is
+  deliberately not implemented. A caller cannot satisfy the provider's requirements: the five
+  mapped composite types are `internal` CLR types it has no way to register (so a supplied pool
+  fails at the first checkpoint, after the service reports healthy), a shared pool carries one
+  `application_name` and so cannot be both the application name and the task hub, and the
+  provider destroys its data source on `StopAsync()`/`Dispose()`, which against a shared pool
+  would take the host application's database access down with it. New
+  [`DATASOURCE.md`](https://github.com/SnpsGroup/durableTask-postgresql/blob/main/src/DurableTask.PostgreSQL/DATASOURCE.md)
+  documents the connection model, limits, failure modes, recommended patterns, and SQL queries
+  for verifying a configuration.
+
+  Known limitation: `ConfigureDataSource` does not apply to schema deployment, which uses a raw
+  connection by design (the type-snapshot carve-out, plus a session-scoped advisory lock that
+  spans several transactions). A deployment authenticating only through a builder callback must
+  deploy the schema out of band and leave `AutoDeploySchema = false` (its default). Routing the
+  deploy through a temporary data source would invoke the caller's callback a second time —
+  starting, for instance, a second background token-refresh timer.
+
 ## [1.0.4] - 2026-11-03
 
 ### Fixed

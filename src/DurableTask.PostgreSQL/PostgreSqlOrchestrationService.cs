@@ -30,6 +30,13 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     private readonly NpgsqlDataSource _dataSource;
     private readonly CancellationTokenSource _shutdownTokenSource = new();
 
+    /// <summary>
+    /// Test-only access to the data source this service built and owns. Not part of the
+    /// public API — exposing the pool publicly would reopen the ownership question that
+    /// keeping the pool private settles (StopAsync and Dispose destroy it).
+    /// </summary>
+    internal NpgsqlDataSource DataSource => _dataSource;
+
     // Idle-poll backoff, one per dispatcher. Both lock_next_* functions run as implicit
     // transactions that commit even when they return no rows, so polling them in a tight loop
     // burns thousands of commits per second against an empty queue. Mirrors the SQL Server
@@ -66,7 +73,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         // ApplicationName. The schema's current_task_hub() uses application_name
         // when TaskHubMode = '0' (the default), so this makes TaskHubName govern
         // the task hub. When TaskHubName is null/empty we leave the connection
-        // string untouched (falls back to CURRENT_USER per TaskHubMode = '1').
+        // string untouched (resolves to any caller-set application_name, or 'default').
         var connectionBuilder = new NpgsqlConnectionStringBuilder(_settings.ConnectionString);
         if (!string.IsNullOrEmpty(_settings.TaskHubName))
         {
@@ -79,11 +86,29 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         // dt.task_event[], etc.); the records in PostgreSqlTypes.cs map to them
         // 1:1 and are sent as typed arrays instead of JSON strings.
         var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionBuilder.ConnectionString);
+
+        // Caller configuration runs first so the provider's own requirements — the composite
+        // mappings below and the ApplicationName that drives current_task_hub() — are applied
+        // on top and win. See DATASOURCE.md section 4.2.
+        _settings.ConfigureDataSource?.Invoke(dataSourceBuilder);
+
+        // Re-assert ApplicationName: a callback may have replaced it via ConnectionStringBuilder
+        // (a shared host config helper setting it to the application's name is the realistic
+        // case), which under TaskHubMode = '0' would silently repoint the task hub.
+        if (!string.IsNullOrEmpty(_settings.TaskHubName))
+        {
+            dataSourceBuilder.ConnectionStringBuilder.ApplicationName = _settings.TaskHubName;
+        }
+
         // Map the PostgreSQL composite types used by checkpoint_orchestration and
-        // complete_tasks. Npgsql resolves each composite's OID on the data source's
-        // first connection, so the dt.* types must already exist by then —
-        // DeploySchemaAsync uses a raw NpgsqlConnection (not this data source) to
-        // avoid populating the type cache before the schema is in place.
+        // complete_tasks. The data source loads and pins the database's type information on
+        // its first physical connection, and these mappings resolve against that snapshot
+        // afterwards — so the dt.* types must already exist before that first connection
+        // opens. Creating them later does not help: the snapshot is per-data-source and
+        // survives pool churn, so every subsequent connection fails too (recoverable only
+        // via NpgsqlDataSource.ReloadTypesAsync). That is why DeploySchemaAsync deploys over
+        // a raw NpgsqlConnection rather than this data source; see the comment there for a
+        // second, independent reason.
         dataSourceBuilder.MapComposite<PostgreSqlTypes.MessageId>($"{_settings.SchemaName}.message_id");
         dataSourceBuilder.MapComposite<PostgreSqlTypes.HistoryEvent>($"{_settings.SchemaName}.history_event");
         dataSourceBuilder.MapComposite<PostgreSqlTypes.OrchestrationEvent>($"{_settings.SchemaName}.orchestration_event");
@@ -1496,12 +1521,22 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         schemaSql = RewriteSchemaName(schemaSql);
         logicSql = RewriteSchemaName(logicSql);
 
-        // Deploy via a raw NpgsqlConnection instead of the pooled _dataSource.
-        // The _dataSource has composite type mappings registered; its type cache is
-        // built on first connection. If that first connection were this deploy
-        // (before the dt.* types exist), the composite mappings would fail to
-        // resolve later. Using a separate connection keeps _dataSource's cache clean
-        // until the schema is in place.
+        // Deploy via a raw NpgsqlConnection instead of the pooled _dataSource, for two
+        // independent reasons — either one alone justifies the carve-out:
+        //
+        // 1. Type snapshot. _dataSource has composite type mappings registered, and it pins
+        //    the database's type information on its first physical connection. If that first
+        //    connection were this deploy (before the dt.* types exist), the mappings would
+        //    fail to resolve on every later connection, not just this one.
+        // 2. Session-scoped advisory lock. The deployment lock below is session-scoped and
+        //    spans several transactions, so it needs a physical session held end to end.
+        //    A pooled connection would not do: returning it to the pool releases the lock.
+        //
+        // Reason 2 holds regardless of how Npgsql evolves its type caching, so do not drop
+        // this carve-out on the strength of reason 1 alone (for example after reaching for
+        // ReloadTypesAsync) — that would silently break the deploy lock's semantics.
+        // Note this path deliberately bypasses settings.ConfigureDataSource; see DATASOURCE.md
+        // section 2 for the AutoDeploySchema limitation that follows.
         var connectionBuilder = new NpgsqlConnectionStringBuilder(_settings.ConnectionString);
         if (!string.IsNullOrEmpty(_settings.TaskHubName))
         {
