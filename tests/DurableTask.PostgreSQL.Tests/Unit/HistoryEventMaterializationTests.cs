@@ -12,6 +12,56 @@ namespace DurableTask.PostgreSQL.Tests.Unit;
 /// </summary>
 public sealed class HistoryEventMaterializationTests
 {
+    [Theory]
+    [InlineData("2026-11-09T02:00:00.123+00:00")]
+    [InlineData("2026-11-09T12:00:00.123+10:00")]
+    [InlineData("2026-11-08T21:00:00.123-05:00")]
+    [InlineData("2026-11-09T02:00:00.123Z")]
+    [InlineData("2026-11-09T02:00:00.123")]
+    public void GetHistoryEvent_PreservesUtcInstant_ForHistoryTimersAndTrace(string timestamp)
+    {
+        // Offset-free legacy JSON represents UTC. Offset-bearing JSON must preserve
+        // the instant regardless of the worker's local timezone (issue #18).
+        var expected = new DateTime(2026, 11, 9, 2, 0, 0, 123, DateTimeKind.Utc);
+        foreach (string eventType in new[] { "ExecutionStarted", "TaskScheduled", "TimerCreated", "TimerFired" })
+        {
+            var element = JsonSerializer.SerializeToElement(new
+            {
+                eventType,
+                taskId = 5,
+                timestamp,
+                visibleTime = timestamp,
+                traceContext = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+            });
+            HistoryEvent historyEvent = PostgreSqlUtils.GetHistoryEvent(element);
+
+            AssertUtcInstant(historyEvent.Timestamp, expected);
+            switch (historyEvent)
+            {
+                case TimerCreatedEvent created:
+                    AssertUtcInstant(created.FireAt, expected);
+                    break;
+                case TimerFiredEvent fired:
+                    AssertUtcInstant(fired.FireAt, expected);
+                    break;
+                case ExecutionStartedEvent started:
+                    Assert.NotNull(started.ParentTraceContext);
+                    Assert.Equal(new DateTimeOffset(expected), started.ParentTraceContext.ActivityStartTime);
+                    break;
+                case TaskScheduledEvent scheduled:
+                    Assert.NotNull(scheduled.ParentTraceContext);
+                    Assert.Equal(new DateTimeOffset(expected), scheduled.ParentTraceContext.ActivityStartTime);
+                    break;
+            }
+        }
+    }
+
+    private static void AssertUtcInstant(DateTime actual, DateTime expected)
+    {
+        Assert.Equal(expected, actual);
+        Assert.Equal(DateTimeKind.Utc, actual.Kind);
+    }
+
     private static JsonElement Parse(string json) =>
         JsonDocument.Parse(json).RootElement;
 

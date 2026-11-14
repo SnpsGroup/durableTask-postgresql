@@ -26,6 +26,12 @@ but targets PostgreSQL and currently concentrates on standalone DTFx support.
 Project file:
 `src/DurableTask.PostgreSQL/DurableTask.PostgreSQL.csproj`
 
+## Upgrading to 2.0
+
+Recompile applications when upgrading from 1.x. Settings properties now have mutable
+setters, which fixes the DI configuration callback but changes their binary signatures.
+Configure settings before constructing the service; live reconfiguration is unsupported.
+
 ## Current scope
 
 - Standalone DTFx backend (`IOrchestrationService` and
@@ -53,7 +59,7 @@ This is a port in progress toward parity with the
 
 **Known limitations (not yet at parity):**
 - **Durable entities**: not implemented (the MSSQL provider's entity feature has
-  no PostgreSQL equivalent yet). Tracked for 1.1.0.
+  no PostgreSQL equivalent yet). Tracked in [#4](https://github.com/SnpsGroup/durableTask-postgresql/issues/4), without a committed release date.
 - **Schema migrations**: forward migrations are supported. The baseline
   (`schema.postgresql.sql`) is applied idempotently for fresh installs; subsequent
   upgrades are applied from embedded `Scripts/migrations/migration-{semver}.postgresql.sql`
@@ -90,6 +96,48 @@ services.AddDurableTaskPostgreSql(new PostgreSqlOrchestrationServiceSettings
     AutoDeploySchema = true
 });
 ```
+
+## Npgsql configuration
+
+Everything configurable through a connection string works as-is. For Npgsql features a
+connection string cannot express — rotating-token auth (AWS RDS IAM, Azure Entra), client
+certificates, a logger factory, tracing — use `ConfigureDataSource` to configure the data
+source the provider builds:
+
+```csharp
+services.AddDurableTaskPostgreSql(new PostgreSqlOrchestrationServiceSettings
+{
+    // Note: no Password= here. Npgsql throws NotSupportedException ("When registering a
+    // password provider, a password or password file may not be set") if the connection
+    // string carries a password and the callback also registers a password provider.
+    ConnectionString = "Host=db.example.com;Database=durabletask;Username=app",
+    TaskHubName = "orders-hub",
+    ConfigureDataSource = builder =>
+    {
+        builder.UsePeriodicPasswordProvider(
+            (csb, ct) => tokenProvider.GetTokenAsync(ct),
+            successRefreshInterval: TimeSpan.FromMinutes(50),
+            failureRefreshInterval: TimeSpan.FromSeconds(5));
+        builder.UseLoggerFactory(loggerFactory);
+    }
+});
+```
+
+The provider passes `ConnectionString` to the builder **before** invoking your callback, so the
+connection string and the callback must not both supply the same credential: omit `Password`
+(and `Passfile`) whenever you register `UsePasswordProvider` or `UsePeriodicPasswordProvider`.
+
+The provider keeps ownership of the pool, and re-applies `TaskHubName` as the connection's
+`ApplicationName` after your callback runs — so a shared configuration helper that sets
+`ApplicationName` cannot silently repoint the task hub. The callback does **not** apply to
+schema deployment, so a deployment that authenticates only through such a callback must deploy
+the schema out of band (leave `AutoDeploySchema` at its default of `false`).
+
+The provider cannot accept a pre-built `NpgsqlDataSource`: its composite type mappings use
+`internal` CLR types a caller cannot register, and sharing the pool would make task hub
+isolation and pool disposal unsafe. See
+[DATASOURCE.md](https://github.com/SnpsGroup/durableTask-postgresql/blob/main/src/DurableTask.PostgreSQL/DATASOURCE.md)
+for the full connection model, limits, and verification queries.
 
 ## Polling and backoff
 
