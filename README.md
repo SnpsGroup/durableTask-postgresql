@@ -56,10 +56,13 @@ This is a port in progress toward parity with the
 - Orchestration query (`GetOrchestrationWithQueryAsync`)
 - Multi-tenancy via task hubs (`TaskHubName`)
 - Concurrent-deploy safety (schema creation retries on contention)
+- Application-owned Npgsql data sources with registered provider composite mappings
+- Durable entities (signals, calls, state queries, and separate or combined dispatch)
+- Optional restricted runtime role, with schema deployment performed by the owner
 
 **Known limitations (not yet at parity):**
-- **Durable entities**: not implemented (the MSSQL provider's entity feature has
-  no PostgreSQL equivalent yet). Tracked in [#4](https://github.com/SnpsGroup/durableTask-postgresql/issues/4), without a committed release date.
+- **Durable entities**: implicit entity deletion is not supported; use explicit entity
+  deletion and storage cleanup. Entity work items use the orchestration tables.
 - **Schema migrations**: forward migrations are supported. The baseline
   (`schema.postgresql.sql`) is applied idempotently for fresh installs; subsequent
   upgrades are applied from embedded `Scripts/migrations/migration-{semver}.postgresql.sql`
@@ -67,8 +70,9 @@ This is a port in progress toward parity with the
   use idempotent DDL (`ADD COLUMN IF NOT EXISTS`, `CREATE TYPE IF NOT EXISTS`, etc.).
 - **Tags**: `OrchestrationState.Tags` is a non-null empty dictionary but tags are
   not persisted (no schema column).
-- **Least-privilege role**: no `dt_runtime`-style role/`GRANT` model yet; connect
-  with a user that can create the schema.
+- **Task hub security**: the runtime role restricts DDL and configuration writes;
+  it does not isolate mutually untrusted tenants from runtime table access.
+  See [restricted runtime deployment](src/DurableTask.PostgreSQL/PERMISSIONS.md).
 
 If any of the above is a blocker for your use case, please open an issue.
 
@@ -133,11 +137,39 @@ The provider keeps ownership of the pool, and re-applies `TaskHubName` as the co
 schema deployment, so a deployment that authenticates only through such a callback must deploy
 the schema out of band (leave `AutoDeploySchema` at its default of `false`).
 
-The provider cannot accept a pre-built `NpgsqlDataSource`: its composite type mappings use
-`internal` CLR types a caller cannot register, and sharing the pool would make task hub
-isolation and pool disposal unsafe. See
+To share an application-owned pool, register provider mappings before building it:
+
+```csharp
+var builder = new NpgsqlDataSourceBuilder(connectionString);
+builder.ConnectionStringBuilder.ApplicationName = "shared-hub";
+builder.UseDurableTaskPostgreSql();
+await using var dataSource = builder.Build();
+services.AddDurableTaskPostgreSql(dataSource, settings => settings.TaskHubName = "shared-hub");
+```
+
+Deploy the schema before the pool opens its first connection. The application owns and
+disposes the pool; stopping the provider leaves it usable. When supplied, `TaskHubName`
+must match its `ApplicationName`. External pools cannot use `AutoDeploySchema` or
+`ConfigureDataSource`; configure their builder and deploy separately. See
 [DATASOURCE.md](https://github.com/SnpsGroup/durableTask-postgresql/blob/main/src/DurableTask.PostgreSQL/DATASOURCE.md)
 for the full connection model, limits, and verification queries.
+
+## Durable entities
+
+The service implements `IEntityOrchestrationService`, including entity metadata/state
+queries and storage cleanup. For native `TaskEntity` processing in DTFx Core 3.7.1,
+set `UseSeparateQueueForEntityWorkItems = true` before constructing the service,
+then register implementations with `TaskHubWorker.AddTaskEntities(...)`.
+The core runtime requires separate dispatch for that API. The default combined
+fetch path remains available for frontends that implement their own entity dispatch.
+
+`MaxConcurrentTaskEntityWorkItems`, `MaxEntityOperationBatchSize`, and
+`EntityMessageReorderWindowInMinutes` control dispatch and message handling.
+Signals auto-create entity schedulers, and delayed signals retain their scheduled
+visibility. Empty entities are retained until explicit storage cleanup; cleanup
+respects the configured reorder window and preserves locked entities or pending signals.
+Entities share the orchestration tables
+and use the core `@entityType@entityKey` instance-ID convention.
 
 ## Polling and backoff
 

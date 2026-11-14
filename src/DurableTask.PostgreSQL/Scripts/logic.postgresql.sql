@@ -194,12 +194,14 @@ CREATE TYPE dt.orchestration_lock_result AS (
 --   p_batch_size: Max number of events to return
 --   p_locked_by: Worker identifier
 --   p_lock_expiration: Lock lease expiration time
+--   p_orchestration_type: -1 all (legacy), 0 orchestration only, 1 entity only
 -- Returns: Composite result with instance metadata, new events, and history
 -- Complexity: HIGH (3 result sets, complex locking, SKIP LOCKED critical)
 CREATE OR REPLACE FUNCTION dt.lock_next_orchestration(
     p_batch_size INTEGER,
     p_locked_by VARCHAR(100),
-    p_lock_expiration TIMESTAMP WITH TIME ZONE
+    p_lock_expiration TIMESTAMP WITH TIME ZONE,
+    p_orchestration_type INTEGER DEFAULT -1
 )
 RETURNS SETOF dt.orchestration_lock_result
 LANGUAGE plpgsql
@@ -217,6 +219,10 @@ BEGIN
     v_task_hub := dt.current_task_hub();
     v_now := NOW();
 
+    IF p_orchestration_type NOT IN (-1, 0, 1) THEN
+        RAISE EXCEPTION 'Invalid orchestration type %', p_orchestration_type;
+    END IF;
+
     -- *** IMPORTANT ***
     -- Maintain consistent table access order to prevent deadlocks
     -- Table order: Instances → NewEvents → Payloads → History
@@ -230,6 +236,9 @@ BEGIN
             e.task_hub = v_task_hub AND
             e.instance_id = i.instance_id
         WHERE i.task_hub = v_task_hub
+          AND (p_orchestration_type = -1
+               OR (p_orchestration_type = 0 AND i.instance_id NOT LIKE '@%@%')
+               OR (p_orchestration_type = 1 AND i.instance_id LIKE '@%@%'))
           AND (i.lock_expiration IS NULL OR i.lock_expiration < v_now)
           AND (e.visible_time IS NULL OR e.visible_time < v_now)
         ORDER BY e.sequence_number  -- FIFO
@@ -964,6 +973,18 @@ BEGIN
 
     -- Create sub-orchestration instances from new events
     IF p_new_orchestration_events IS NOT NULL THEN
+        -- Entity calls/signals auto-create a scheduler on first use, just like
+        -- MSSQL. Leave their EventRaised execution ID null so core AutoStart can
+        -- synthesize the initial ExecutionStarted event when the row is fetched.
+        -- Updating the unchanged name deliberately holds the instance-row lock
+        -- through event insertion, serializing producers with empty-entity cleanup.
+        INSERT INTO dt.instances AS entity (task_hub, instance_id, name, version, runtime_status)
+        SELECT DISTINCT v_task_hub, e.instance_id, split_part(e.instance_id, '@', 2), '', 'Pending'
+        FROM unnest(p_new_orchestration_events) AS e
+        WHERE e.event_type = 'EventRaised' AND e.instance_id LIKE '@_%@%'
+        ORDER BY e.instance_id
+        ON CONFLICT (task_hub, instance_id) DO UPDATE SET name = entity.name;
+
         INSERT INTO dt.instances (
             task_hub, instance_id, execution_id, name, version,
             parent_instance_id, runtime_status, trace_context
@@ -1064,7 +1085,8 @@ CREATE OR REPLACE FUNCTION dt.add_orchestration_event(
     p_event_type VARCHAR(40),
     p_name VARCHAR(300) DEFAULT NULL,
     p_payload_text JSONB DEFAULT NULL,
-    p_trace_context VARCHAR(800) DEFAULT NULL
+    p_trace_context VARCHAR(800) DEFAULT NULL,
+    p_visible_time TIMESTAMP WITH TIME ZONE DEFAULT NULL
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -1075,6 +1097,16 @@ DECLARE
     v_payload_id UUID;
 BEGIN
     v_task_hub := dt.current_task_hub();
+
+    -- Auto-start entity schedulers on the first client signal. Conflict handling
+    -- makes concurrent first signals converge on one instance without dropping any.
+    -- DO UPDATE also retains the existing instance lock until the event is queued,
+    -- so cleanup cannot remove the instance between this upsert and event insertion.
+    IF p_event_type = 'EventRaised' AND p_instance_id LIKE '@_%@%' THEN
+        INSERT INTO dt.instances AS entity (task_hub, instance_id, name, version, runtime_status)
+        VALUES (v_task_hub, p_instance_id, split_part(p_instance_id, '@', 2), '', 'Pending')
+        ON CONFLICT (task_hub, instance_id) DO UPDATE SET name = entity.name;
+    END IF;
 
     -- Get execution ID from existing instance
     SELECT i.execution_id INTO v_execution_id
@@ -1095,9 +1127,11 @@ BEGIN
 
     -- Insert event
     INSERT INTO dt.new_events (
-        task_hub, instance_id, execution_id, event_type, name, payload_id, trace_context
+        task_hub, instance_id, execution_id, event_type, name, payload_id, trace_context, visible_time
     ) VALUES (
-        v_task_hub, p_instance_id, v_execution_id, p_event_type, p_name, v_payload_id, p_trace_context
+        v_task_hub, p_instance_id,
+        CASE WHEN p_instance_id LIKE '@_%@%' AND p_event_type = 'EventRaised' THEN NULL ELSE v_execution_id END,
+        p_event_type, p_name, v_payload_id, p_trace_context, p_visible_time
     );
 END;
 $$;
@@ -1404,7 +1438,7 @@ BEGIN
       AND (p_instance_id_prefix IS NULL OR i.instance_id LIKE p_instance_id_prefix || '%')
       AND (p_exclude_sub_orchestrations = FALSE OR i.parent_instance_id IS NULL)
       AND (p_runtime_status_filter IS NULL OR i.runtime_status = ANY(string_to_array(p_runtime_status_filter, ',')))
-    ORDER BY i.created_time DESC
+    ORDER BY i.created_time DESC, i.instance_id
     LIMIT p_page_size
     OFFSET v_offset;
 END;
