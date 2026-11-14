@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-14
+
 ### Added
 - Accept application-owned `NpgsqlDataSource` pools through settings or DI, with public
   composite mapping registration and startup validation. External pools remain caller-owned (#7).
