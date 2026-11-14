@@ -36,7 +36,8 @@ public sealed partial class PostgreSqlOrchestrationService
         DateTime lastUpdatedTime, DateTime cutoff, CancellationToken cancellation)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellation).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellation).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(
+            System.Data.IsolationLevel.ReadCommitted, cancellation).ConfigureAwait(false);
         await using var query = new NpgsqlCommand($"""
             SELECT 1
             FROM {_settings.SchemaName}.instances i
