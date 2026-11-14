@@ -201,7 +201,7 @@ CREATE OR REPLACE FUNCTION dt.current_task_hub()
 RETURNS VARCHAR(50)
 LANGUAGE plpgsql
 STABLE  -- Result doesn't change within transaction (cannot be IMMUTABLE as it calls CURRENT_USER)
-SECURITY DEFINER  -- Run with owner privileges to access global_settings
+SECURITY INVOKER  -- Preserve the runtime role's identity for TaskHubMode = '1'
 AS $$
 DECLARE
     v_task_hub_mode TEXT;

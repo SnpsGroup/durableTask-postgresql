@@ -1,6 +1,7 @@
 using DurableTask.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 
 namespace DurableTask.PostgreSQL;
 
@@ -9,6 +10,22 @@ namespace DurableTask.PostgreSQL;
 /// </summary>
 public static class ServiceCollectionExtensions
 {
+    /// <summary>Registers the provider using an application-owned, preconfigured data source.</summary>
+    /// <param name="services">Service collection.</param>
+    /// <param name="dataSource">Externally owned pool with DurableTask composite mappings.</param>
+    /// <param name="configure">Optional settings configuration before constructing the service.</param>
+    /// <returns>The service collection.</returns>
+    public static IServiceCollection AddDurableTaskPostgreSql(
+        this IServiceCollection services,
+        NpgsqlDataSource dataSource,
+        Action<PostgreSqlOrchestrationServiceSettings>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        var settings = new PostgreSqlOrchestrationServiceSettings { DataSource = dataSource };
+        configure?.Invoke(settings);
+        return services.AddDurableTaskPostgreSql(settings);
+    }
+
     /// <summary>
     /// Adds PostgreSqlOrchestrationService as the DurableTask backend.
     /// </summary>
@@ -50,6 +67,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IOrchestrationServiceClient>(sp =>
             sp.GetRequiredService<PostgreSqlOrchestrationService>());
 
+        services.AddSingleton<DurableTask.Core.Entities.IEntityOrchestrationService>(sp =>
+            sp.GetRequiredService<PostgreSqlOrchestrationService>());
+
         return services;
     }
 
@@ -74,6 +94,9 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<PostgreSqlOrchestrationService>());
 
         services.AddSingleton<IOrchestrationServiceClient>(sp =>
+            sp.GetRequiredService<PostgreSqlOrchestrationService>());
+
+        services.AddSingleton<DurableTask.Core.Entities.IEntityOrchestrationService>(sp =>
             sp.GetRequiredService<PostgreSqlOrchestrationService>());
 
         return services;

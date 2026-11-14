@@ -17,7 +17,7 @@ namespace DurableTask.PostgreSQL;
 /// PostgreSQL implementation of IOrchestrationService for DurableTask Framework.
 /// Provides durable workflow orchestration using PostgreSQL 17+ as the backend.
 /// </summary>
-public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrchestrationServiceClient, IDisposable
+public sealed partial class PostgreSqlOrchestrationService : DurableTask.Core.Entities.IEntityOrchestrationService, IOrchestrationServiceClient, IDisposable
 {
     /// <summary>
     /// The schema name the embedded SQL scripts are authored against. Deployments into a
@@ -28,12 +28,11 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     private readonly PostgreSqlOrchestrationServiceSettings _settings;
     private readonly ILogger<PostgreSqlOrchestrationService> _logger;
     private readonly NpgsqlDataSource _dataSource;
+    private readonly bool _ownsDataSource;
     private readonly CancellationTokenSource _shutdownTokenSource = new();
 
     /// <summary>
-    /// Test-only access to the data source this service built and owns. Not part of the
-    /// public API — exposing the pool publicly would reopen the ownership question that
-    /// keeping the pool private settles (StopAsync and Dispose destroy it).
+    /// Test access to the effective data source. External pools remain caller-owned.
     /// </summary>
     internal NpgsqlDataSource DataSource => _dataSource;
 
@@ -69,52 +68,75 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             _settings.WorkItemPollingInterval,
             _settings.DeltaBackoffWorkItemPollingInterval);
 
-        // Propagate TaskHubName to PostgreSQL by setting it as the connection's
-        // ApplicationName. The schema's current_task_hub() uses application_name
-        // when TaskHubMode = '0' (the default), so this makes TaskHubName govern
-        // the task hub. When TaskHubName is null/empty we leave the connection
-        // string untouched (resolves to any caller-set application_name, or 'default').
-        var connectionBuilder = new NpgsqlConnectionStringBuilder(_settings.ConnectionString);
-        if (!string.IsNullOrEmpty(_settings.TaskHubName))
+        if (_settings.MaxConcurrentTaskEntityWorkItems <= 0 ||
+            _settings.EntityMessageReorderWindowInMinutes < 0 ||
+            _settings.MaxEntityOperationBatchSize is <= 0)
         {
-            connectionBuilder.ApplicationName = _settings.TaskHubName;
+            throw new ArgumentOutOfRangeException(nameof(settings), "Entity concurrency and batch size must be positive and the reorder window non-negative.");
         }
 
-        // Build the data source via NpgsqlDataSourceBuilder so we can register
-        // composite type mappings. checkpoint_orchestration and complete_tasks
-        // take arrays of PostgreSQL composite types (dt.history_event[],
-        // dt.task_event[], etc.); the records in PostgreSqlTypes.cs map to them
-        // 1:1 and are sent as typed arrays instead of JSON strings.
-        var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionBuilder.ConnectionString);
-
-        // Caller configuration runs first so the provider's own requirements — the composite
-        // mappings below and the ApplicationName that drives current_task_hub() — are applied
-        // on top and win. See DATASOURCE.md section 4.2.
-        _settings.ConfigureDataSource?.Invoke(dataSourceBuilder);
-
-        // Re-assert ApplicationName: a callback may have replaced it via ConnectionStringBuilder
-        // (a shared host config helper setting it to the application's name is the realistic
-        // case), which under TaskHubMode = '0' would silently repoint the task hub.
-        if (!string.IsNullOrEmpty(_settings.TaskHubName))
+        if (_settings.DataSource is { } externalDataSource)
         {
-            dataSourceBuilder.ConnectionStringBuilder.ApplicationName = _settings.TaskHubName;
+            if (_settings.ConfigureDataSource != null || _settings.AutoDeploySchema)
+            {
+                throw new ArgumentException("An external DataSource cannot use ConfigureDataSource or AutoDeploySchema. Deploy the schema separately before opening the pool.", nameof(settings));
+            }
+            var externalConnection = new NpgsqlConnectionStringBuilder(externalDataSource.ConnectionString);
+            if (!string.IsNullOrEmpty(_settings.TaskHubName) &&
+                !string.Equals(_settings.TaskHubName, externalConnection.ApplicationName, StringComparison.Ordinal))
+            {
+                throw new ArgumentException("TaskHubName must match the external DataSource ApplicationName.", nameof(settings));
+            }
+            _dataSource = externalDataSource;
+            _ownsDataSource = false;
         }
+        else
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(_settings.ConnectionString);
+            _ownsDataSource = true;
+            // Propagate TaskHubName to PostgreSQL by setting it as the connection's
+            // ApplicationName. The schema's current_task_hub() uses application_name
+            // when TaskHubMode = '0' (the default), so this makes TaskHubName govern
+            // the task hub. When TaskHubName is null/empty we leave the connection
+            // string untouched (resolves to any caller-set application_name, or 'default').
+            var connectionBuilder = new NpgsqlConnectionStringBuilder(_settings.ConnectionString);
+            if (!string.IsNullOrEmpty(_settings.TaskHubName))
+            {
+                connectionBuilder.ApplicationName = _settings.TaskHubName;
+            }
 
-        // Map the PostgreSQL composite types used by checkpoint_orchestration and
-        // complete_tasks. The data source loads and pins the database's type information on
-        // its first physical connection, and these mappings resolve against that snapshot
-        // afterwards — so the dt.* types must already exist before that first connection
-        // opens. Creating them later does not help: the snapshot is per-data-source and
-        // survives pool churn, so every subsequent connection fails too (recoverable only
-        // via NpgsqlDataSource.ReloadTypesAsync). That is why DeploySchemaAsync deploys over
-        // a raw NpgsqlConnection rather than this data source; see the comment there for a
-        // second, independent reason.
-        dataSourceBuilder.MapComposite<PostgreSqlTypes.MessageId>($"{_settings.SchemaName}.message_id");
-        dataSourceBuilder.MapComposite<PostgreSqlTypes.HistoryEvent>($"{_settings.SchemaName}.history_event");
-        dataSourceBuilder.MapComposite<PostgreSqlTypes.OrchestrationEvent>($"{_settings.SchemaName}.orchestration_event");
-        dataSourceBuilder.MapComposite<PostgreSqlTypes.TaskEvent>($"{_settings.SchemaName}.task_event");
-        dataSourceBuilder.MapComposite<PostgreSqlTypes.TaskResult>($"{_settings.SchemaName}.task_result");
-        _dataSource = dataSourceBuilder.Build();
+            // Build the data source via NpgsqlDataSourceBuilder so we can register
+            // composite type mappings. checkpoint_orchestration and complete_tasks
+            // take arrays of PostgreSQL composite types (dt.history_event[],
+            // dt.task_event[], etc.); the records in PostgreSqlTypes.cs map to them
+            // 1:1 and are sent as typed arrays instead of JSON strings.
+            var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionBuilder.ConnectionString);
+
+            // Caller configuration runs first so the provider's own requirements — the composite
+            // mappings below and the ApplicationName that drives current_task_hub() — are applied
+            // on top and win. See DATASOURCE.md section 4.2.
+            _settings.ConfigureDataSource?.Invoke(dataSourceBuilder);
+
+            // Re-assert ApplicationName: a callback may have replaced it via ConnectionStringBuilder
+            // (a shared host config helper setting it to the application's name is the realistic
+            // case), which under TaskHubMode = '0' would silently repoint the task hub.
+            if (!string.IsNullOrEmpty(_settings.TaskHubName))
+            {
+                dataSourceBuilder.ConnectionStringBuilder.ApplicationName = _settings.TaskHubName;
+            }
+
+            // Map the PostgreSQL composite types used by checkpoint_orchestration and
+            // complete_tasks. The data source loads and pins the database's type information on
+            // its first physical connection, and these mappings resolve against that snapshot
+            // afterwards — so the dt.* types must already exist before that first connection
+            // opens. Creating them later does not help: the snapshot is per-data-source and
+            // survives pool churn, so every subsequent connection fails too (recoverable only
+            // via NpgsqlDataSource.ReloadTypesAsync). That is why DeploySchemaAsync deploys over
+            // a raw NpgsqlConnection rather than this data source; see the comment there for a
+            // second, independent reason.
+            dataSourceBuilder.UseDurableTaskPostgreSql(_settings.SchemaName);
+            _dataSource = dataSourceBuilder.Build();
+        }
 
         _logger.LogInformation(
             "PostgreSqlOrchestrationService initialized with TaskHub={TaskHub}, WorkerId={WorkerId}",
@@ -172,6 +194,11 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
         // Verify connectivity
         await using var connection = await _dataSource.OpenConnectionAsync(_shutdownTokenSource.Token).ConfigureAwait(false);
+        if (!_ownsDataSource)
+        {
+            await NpgsqlDataSourceBuilderExtensions.ValidateDurableTaskMappingsAsync(
+                connection, _settings.SchemaName, _shutdownTokenSource.Token).ConfigureAwait(false);
+        }
         await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.current_task_hub()", connection);
         var taskHub = await cmd.ExecuteScalarAsync(_shutdownTokenSource.Token).ConfigureAwait(false) as string;
 
@@ -185,7 +212,10 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
         _shutdownTokenSource.Cancel();
 
-        await _dataSource.DisposeAsync().ConfigureAwait(false);
+        if (_ownsDataSource)
+        {
+            await _dataSource.DisposeAsync().ConfigureAwait(false);
+        }
 
         _logger.LogInformation("PostgreSqlOrchestrationService stopped");
     }
@@ -204,9 +234,16 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     }
 
     /// <inheritdoc cref="IOrchestrationService.LockNextTaskOrchestrationWorkItemAsync" />
-    public async Task<TaskOrchestrationWorkItem?> LockNextTaskOrchestrationWorkItemAsync(
+    public Task<TaskOrchestrationWorkItem?> LockNextTaskOrchestrationWorkItemAsync(
         TimeSpan receiveTimeout,
         CancellationToken cancellationToken)
+        => LockNextWorkItemAsync(receiveTimeout, cancellationToken,
+            _settings.UseSeparateQueueForEntityWorkItems ? 0 : -1);
+
+    private async Task<TaskOrchestrationWorkItem?> LockNextWorkItemAsync(
+        TimeSpan receiveTimeout,
+        CancellationToken cancellationToken,
+        int orchestrationType)
     {
         // Poll until work shows up or receiveTimeout elapses, backing off between empty polls.
         // Returning null on the first empty result instead would hand control straight back to
@@ -221,7 +258,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             // instead of sleeping on information that is already stale.
             ulong generation = _orchestrationBackoffHelper.CurrentGeneration;
 
-            var workItem = await TryLockNextTaskOrchestrationWorkItemAsync(cancellationToken)
+            var workItem = await TryLockNextTaskOrchestrationWorkItemAsync(cancellationToken, orchestrationType)
                 .ConfigureAwait(false);
             if (workItem != null)
             {
@@ -257,7 +294,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     /// available (or the locked instance turned out to be in a terminal state).
     /// </summary>
     private async Task<TaskOrchestrationWorkItem?> TryLockNextTaskOrchestrationWorkItemAsync(
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, int orchestrationType)
     {
         try
         {
@@ -265,12 +302,13 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
 
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
-                $"SELECT * FROM {_settings.SchemaName}.lock_next_orchestration($1, $2, $3)",
+                $"SELECT * FROM {_settings.SchemaName}.lock_next_orchestration($1, $2, $3, $4)",
                 connection);
 
             cmd.Parameters.AddWithValue(_settings.MaxConcurrentOrchestrations);
             cmd.Parameters.AddWithValue(_settings.WorkerId);
             cmd.Parameters.AddWithValue(lockExpiration);
+            cmd.Parameters.AddWithValue(orchestrationType);
 
             string instanceId;
             string executionId;
@@ -346,6 +384,12 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             {
                 orchestrationName = startedEvent.Name;
                 instance = startedEvent.OrchestrationInstance;
+            }
+            else if (messages.Count > 0 && DurableTask.Core.Common.Entities.AutoStart(instanceId, messages) &&
+                messages[0].Event is ExecutionStartedEvent autoStarted)
+            {
+                orchestrationName = autoStarted.Name;
+                instance = autoStarted.OrchestrationInstance;
             }
             else
             {
@@ -725,7 +769,8 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
             Name = GetEventNameValue(evt),
             RuntimeStatus = "Pending",
             TaskId = GetTaskEventId(evt),
-            VisibleTime = ToUtc(GetEventVisibleTimeValue(evt)),
+            VisibleTime = DurableTask.Core.Common.Entities.IsDelayedEntityMessage(msg, out var due)
+                ? new DateTimeOffset(due) : ToUtc(GetEventVisibleTimeValue(evt)),
             Reason = GetEventReasonValue(evt),
             PayloadText = payloadText,
             PayloadId = payloadText != null ? Guid.NewGuid() : null,
@@ -1062,7 +1107,7 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         ArgumentNullException.ThrowIfNull(message.OrchestrationInstance);
 
         await using var connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
-        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.add_orchestration_event($1, $2, $3, $4, $5)", connection);
+        await using var cmd = new NpgsqlCommand($"SELECT {_settings.SchemaName}.add_orchestration_event($1, $2, $3, $4, $5, $6)", connection);
 
         var eventType = message.Event.EventType.ToString();
         string? name = null;
@@ -1099,6 +1144,13 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         }
         
         cmd.Parameters.AddWithValue(traceContext ?? (object)DBNull.Value);
+
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.TimestampTz,
+            Value = DurableTask.Core.Common.Entities.IsDelayedEntityMessage(message, out var due)
+                ? due : DBNull.Value,
+        });
 
         await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
 
@@ -1566,6 +1618,14 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
         {
             await DeploySchemaScriptsAsync(connection, schemaSql, logicSql).ConfigureAwait(false);
             await ApplyMigrationsAsync(connection).ConfigureAwait(false);
+            if (_settings.DeployRuntimePermissions)
+            {
+                var permissionsSql = RewriteSchemaName(await GetEmbeddedScriptAsync("permissions.postgresql.sql").ConfigureAwait(false));
+                await using var transaction = await connection.BeginTransactionAsync().ConfigureAwait(false);
+                await using var permissionsCommand = new NpgsqlCommand(permissionsSql, connection, transaction);
+                await permissionsCommand.ExecuteNonQueryAsync().ConfigureAwait(false);
+                await transaction.CommitAsync().ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -1882,12 +1942,15 @@ public sealed class PostgreSqlOrchestrationService : IOrchestrationService, IOrc
     }
 
     /// <summary>
-    /// Disposes the PostgreSQL data source and shutdown token source, releasing all
-    /// database connections and internal resources held by this service.
+    /// Releases service resources and its internally owned pool. An external pool
+    /// remains usable and must be disposed by its owner.
     /// </summary>
     public void Dispose()
     {
         _shutdownTokenSource?.Dispose();
-        _dataSource?.Dispose();
+        if (_ownsDataSource)
+        {
+            _dataSource.Dispose();
+        }
     }
 }

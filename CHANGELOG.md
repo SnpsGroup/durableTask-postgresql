@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-14
+
+### Added
+- Accept application-owned `NpgsqlDataSource` pools through settings or DI, with public
+  composite mapping registration and startup validation. External pools remain caller-owned (#7).
+- Optional `DeployRuntimePermissions` role/grant deployment for restricted runtime users,
+  including sequences, read-only configuration and custom schemas (#5).
+- Durable entity capabilities, dispatch filters, implicit scheduler creation, delayed
+  signals, metadata/state queries and storage cleanup (#4). Native Core 3.7.1 entity
+  registration requires `UseSeparateQueueForEntityWorkItems = true`.
+
+### Fixed
+- Evaluate user-based task hubs with invoker privileges instead of the schema owner's
+  identity. Opted-in runtime permissions revoke PUBLIC routine execution; reapply grants
+  during each owner deployment. Runtime table access does not provide tenant isolation.
+
+### Upgrade notes
+- Deploy the updated schema/logic before running the new entity dispatch paths. Existing
+  SQL calls remain valid through optional function parameters. External pools must be built
+  with provider composite mappings and opened only after schema deployment.
+
 ## [2.0.0] - 2026-11-14
 
 ### Breaking changes

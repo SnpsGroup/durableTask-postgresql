@@ -39,6 +39,7 @@ public sealed class ServiceCollectionExtensionsTests
 
         Assert.Same(service, provider.GetRequiredService<IOrchestrationService>());
         Assert.Same(service, provider.GetRequiredService<IOrchestrationServiceClient>());
+        Assert.Same(service, provider.GetRequiredService<DurableTask.Core.Entities.IEntityOrchestrationService>());
         Assert.Equal(17, service.MaxConcurrentTaskOrchestrationWorkItems);
         Assert.Equal(23, service.MaxConcurrentTaskActivityWorkItems);
         Assert.Equal(TimeSpan.FromMilliseconds(80), configuredSettings.MinWorkItemPollingInterval);

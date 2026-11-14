@@ -12,9 +12,17 @@ namespace DurableTask.PostgreSQL;
 public sealed class PostgreSqlOrchestrationServiceSettings
 {
     /// <summary>
-    /// PostgreSQL connection string.
+    /// PostgreSQL connection string, required when DataSource is not supplied.
     /// </summary>
-    public required string ConnectionString { get; set; }
+    public string ConnectionString { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional externally owned pool, built with UseDurableTaskPostgreSql mappings.
+    /// The caller must deploy the schema before opening the pool. The service never disposes it.
+    /// ConfigureDataSource and AutoDeploySchema cannot be combined with an external pool.
+    /// When TaskHubName is set it must match the pool's ApplicationName.
+    /// </summary>
+    public NpgsqlDataSource? DataSource { get; set; }
 
     /// <summary>
     /// Optional hook to configure the Npgsql data source the service builds, for Npgsql
@@ -124,6 +132,25 @@ public sealed class PostgreSqlOrchestrationServiceSettings
     /// Default: false (manual deployment recommended)
     /// </summary>
     public bool AutoDeploySchema { get; set; }
+
+    /// <summary>
+    /// Deploy the optional dt_runtime role and runtime grants during schema deployment.
+    /// Requires role-management privileges when the role does not exist. Default: false.
+    /// This removes the need for runtime DDL privileges; it is not tenant isolation.
+    /// </summary>
+    public bool DeployRuntimePermissions { get; set; }
+
+    /// <summary>Maximum concurrent entity work items. Default: 100.</summary>
+    public int MaxConcurrentTaskEntityWorkItems { get; set; } = 100;
+
+    /// <summary>Entity message reorder window in minutes. Default: 30.</summary>
+    public int EntityMessageReorderWindowInMinutes { get; set; } = 30;
+
+    /// <summary>Dispatch entities separately from orchestrations. Default: false.</summary>
+    public bool UseSeparateQueueForEntityWorkItems { get; set; }
+
+    /// <summary>Maximum operations per entity batch; null imposes no batch-size limit.</summary>
+    public int? MaxEntityOperationBatchSize { get; set; }
 
     /// <summary>
     /// Worker identifier for lock ownership.
