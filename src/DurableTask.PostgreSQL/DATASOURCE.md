@@ -140,12 +140,12 @@ service.
 
 ## 2. Current limits
 
-Known constraints of the connection model as of 1.1.0.
+Known constraints of the connection model as of 2.0.0.
 
 | Limit | Detail |
 | --- | --- |
 | **One pool per service instance** | The data source is created in the constructor and never replaced. Two services against the same database (different task hubs or schemas) mean two pools. |
-| **Npgsql configuration is reachable, but only through `ConfigureDataSource`** | Since 1.1.0, anything configurable through `NpgsqlDataSourceBuilder` — client certificates, `UsePasswordProvider` / `UsePeriodicPasswordProvider` (for example AWS RDS IAM or Azure Entra token rotation), `UseLoggerFactory`, `ConfigureTracing`, `UsePhysicalConnectionInitializer` — is available via the `ConfigureDataSource` callback (4.2). There is still no dedicated setting per feature; in particular the mssql provider exposes `LoggerFactory` as a first-class setting, where here it goes through the callback. Before 1.1.0 only what fits in a connection string was available. |
+| **Npgsql configuration is reachable, but only through `ConfigureDataSource`** | Since 2.0.0, anything configurable through `NpgsqlDataSourceBuilder` — client certificates, `UsePasswordProvider` / `UsePeriodicPasswordProvider` (for example AWS RDS IAM or Azure Entra token rotation), `UseLoggerFactory`, `ConfigureTracing`, `UsePhysicalConnectionInitializer` — is available via the `ConfigureDataSource` callback (4.2). There is still no dedicated setting per feature; in particular the mssql provider exposes `LoggerFactory` as a first-class setting, where here it goes through the callback. Before 2.0.0 only what fits in a connection string was available. |
 | **Pool cannot be shared with the host application** | An application already using PostgreSQL as its data store runs a second, independent pool for the task hub. Connection budget on the server is consumed twice, and `max_connections` planning must account for both. This is the substance of issue #7. |
 | **`ApplicationName` is reserved by the provider** | When `TaskHubName` is set, any `ApplicationName` in the supplied connection string is overwritten (`:77-81`), and re-applied after the `ConfigureDataSource` callback (`:98-101`) so a callback cannot repoint it either. It is not available for application-level connection tagging on provider connections. |
 | **`TaskHubName` is silently optional** | When `TaskHubName` is null or empty, the connection string is left untouched and the effective task hub becomes whatever `application_name` Npgsql sends by default, or `CURRENT_USER` under `TaskHubMode = '1'`, or `'default'`. There is no validation and no warning. |
@@ -320,7 +320,7 @@ this is a boundary of intent, not of privilege.
 
 Pool ownership stays with the provider, so disposal semantics are unchanged.
 
-> Status: available since 1.1.0 (issue #7). Not available in 1.0.4 or earlier.
+> Status: available since 2.0.0 (issue #7). Not available in 1.0.4 or earlier.
 
 ### 4.3 Share the application's pool (advanced, opt-in)
 
@@ -341,7 +341,7 @@ whole application to adopt the task hub name as its `application_name`, losing
 application-level connection attribution in `pg_stat_activity`.
 
 Condition 1 additionally requires the composite CLR types to be public — they
-are still `internal` as of 1.1.0 (see section 2), so this pattern is **not
+are still `internal` as of 2.0.0 (see section 2), so this pattern is **not
 expressible today** and would require exporting the type mappings as public API.
 
 > Status: not implemented, and not recommended. Documented so the trade-off is

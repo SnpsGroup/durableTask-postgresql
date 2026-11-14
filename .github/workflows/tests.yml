@@ -39,6 +39,8 @@ jobs:
           --health-retries 10
 
     env:
+      # Exercise JSON timestamp materialization outside UTC (regression #18).
+      TZ: America/Sao_Paulo
       # The integration tests read this env var to locate the service container.
       POSTGRES_CONNECTION_STRING: "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
 

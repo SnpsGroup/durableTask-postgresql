@@ -6,7 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0] - 2026-11-04
+## [2.0.0] - 2026-11-14
+
+### Breaking changes
+- Settings properties now use mutable setters so the DI configuration callback can apply changes (#15). Recompile applications when upgrading from 1.x; replacing init accessors changes their binary signatures. Configure settings before constructing the service; live reconfiguration is unsupported.
+
+### Fixed
+- Preserve UTC instants when materializing JSON history timestamps, timer fire times, and trace start times on non-UTC hosts (#18). Legacy offset-free timestamps remain UTC.
+- Make terminal-instance discard coverage wait for an empty queue and instance-specific discard evidence instead of sampling a transient queued event (#16).
+
 
 ### Added
 - **`PostgreSqlOrchestrationServiceSettings.ConfigureDataSource`** — an optional
@@ -18,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UsePhysicalConnectionInitializer`. Requested by
   [@Clockwork-Muse](https://github.com/Clockwork-Muse).
 
-  Additive and backward compatible: leaving it unset reproduces 1.0.4 behavior exactly.
+  The data-source hook is additive: leaving it unset keeps the default connection configuration. See the breaking changes above for the settings accessor change.
 
   The callback runs after the connection string is applied and **before** the provider
   registers its composite type mappings and re-applies `TaskHubName` as `ApplicationName`, so

@@ -31,7 +31,17 @@ public sealed class TestService : IAsyncLifetime
         _logger = _loggerFactory.CreateLogger<TestService>();
     }
 
-    public IList<LogEntry> LogEntries => _logs;
+    public IList<LogEntry> LogEntries
+    {
+        get
+        {
+            // Workers can still be logging while assertions enumerate their evidence.
+            lock (_logs)
+            {
+                return _logs.ToArray();
+            }
+        }
+    }
     public ILoggerFactory LoggerFactory => _loggerFactory;
     public PostgreSqlOrchestrationService OrchestrationService => _orchestrationService!;
     public PostgreSqlOrchestrationService ClientService => _clientService!;
@@ -109,14 +119,19 @@ public sealed class TestLogger : ILogger
 
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     {
-        _logs.Add(new LogEntry
+        var entry = new LogEntry
         {
             Timestamp = DateTime.UtcNow,
             LogLevel = logLevel,
             Category = _categoryName,
             Message = formatter(state, exception),
             Exception = exception
-        });
+        };
+
+        lock (_logs)
+        {
+            _logs.Add(entry);
+        }
     }
 }
 

@@ -199,10 +199,7 @@ static class PostgreSqlUtils
 
         if (reader.TryGetProperty("timestamp", out var timestampElement))
         {
-            // The column is TIMESTAMP WITH TIME ZONE (UTC), but JsonElement.GetDateTime
-            // returns DateTimeKind.Unspecified/Local. Normalize to Utc so consumers that
-            // require Utc (e.g. the DTFx v2 gRPC sidecar's Timestamp.FromDateTime) work.
-            historyEvent.Timestamp = DateTime.SpecifyKind(timestampElement.GetDateTime(), DateTimeKind.Utc);
+            historyEvent.Timestamp = GetUtcDateTime(timestampElement);
         }
         
         if (isOrchestrationHistory && reader.TryGetProperty("isPlayed", out var isPlayedElement))
@@ -287,7 +284,7 @@ static class PostgreSqlUtils
     {
         if (reader.TryGetProperty("visibleTime", out var visibleTimeElement) && visibleTimeElement.ValueKind != JsonValueKind.Null)
         {
-            return DateTime.SpecifyKind(visibleTimeElement.GetDateTime(), DateTimeKind.Utc);
+            return GetUtcDateTime(visibleTimeElement);
         }
         return null;
     }
@@ -378,10 +375,20 @@ static class PostgreSqlUtils
 
         if (reader.TryGetProperty("timestamp", out var timestampElement))
         {
-            traceContext.ActivityStartTime = DateTime.SpecifyKind(timestampElement.GetDateTime(), DateTimeKind.Utc);
+            traceContext.ActivityStartTime = GetUtcDateTime(timestampElement);
         }
 
         return traceContext;
+    }
+
+    static DateTime GetUtcDateTime(JsonElement element)
+    {
+        DateTime value = element.GetDateTime();
+        // Legacy offset-free JSON is UTC. PostgreSQL timestamptz JSON includes an
+        // offset: preserve its instant instead of relabeling the host's local time.
+        return value.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
+            : element.GetDateTimeOffset().UtcDateTime;
     }
 
     static OrchestrationStatus GetRuntimeStatus(NpgsqlDataReader reader)

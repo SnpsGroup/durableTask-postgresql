@@ -26,6 +26,12 @@ but targets PostgreSQL and currently concentrates on standalone DTFx support.
 Project file:
 `src/DurableTask.PostgreSQL/DurableTask.PostgreSQL.csproj`
 
+## Upgrading to 2.0
+
+Recompile applications when upgrading from 1.x. Settings properties now have mutable
+setters, which fixes the DI configuration callback but changes their binary signatures.
+Configure settings before constructing the service; live reconfiguration is unsupported.
+
 ## Current scope
 
 - Standalone DTFx backend (`IOrchestrationService` and
@@ -53,7 +59,7 @@ This is a port in progress toward parity with the
 
 **Known limitations (not yet at parity):**
 - **Durable entities**: not implemented (the MSSQL provider's entity feature has
-  no PostgreSQL equivalent yet). Tracked for 1.1.0.
+  no PostgreSQL equivalent yet). Tracked in [#4](https://github.com/SnpsGroup/durableTask-postgresql/issues/4), without a committed release date.
 - **Schema migrations**: forward migrations are supported. The baseline
   (`schema.postgresql.sql`) is applied idempotently for fresh installs; subsequent
   upgrades are applied from embedded `Scripts/migrations/migration-{semver}.postgresql.sql`

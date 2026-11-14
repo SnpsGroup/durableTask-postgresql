@@ -5,12 +5,16 @@ namespace DurableTask.PostgreSQL;
 /// <summary>
 /// Configuration settings for PostgreSqlOrchestrationService.
 /// </summary>
+/// <remarks>
+/// Configure these settings before constructing or resolving the service. Changing settings
+/// afterwards is not supported: connections and polling strategies are created during construction.
+/// </remarks>
 public sealed class PostgreSqlOrchestrationServiceSettings
 {
     /// <summary>
     /// PostgreSQL connection string.
     /// </summary>
-    public required string ConnectionString { get; init; }
+    public required string ConnectionString { get; set; }
 
     /// <summary>
     /// Optional hook to configure the Npgsql data source the service builds, for Npgsql
@@ -50,7 +54,7 @@ public sealed class PostgreSqlOrchestrationServiceSettings
     /// sections 2 and 4.2.
     /// </para>
     /// </remarks>
-    public Action<NpgsqlDataSourceBuilder>? ConfigureDataSource { get; init; }
+    public Action<NpgsqlDataSourceBuilder>? ConfigureDataSource { get; set; }
 
     /// <summary>
     /// Task hub name. When set, it is propagated to PostgreSQL as the connection's
@@ -58,37 +62,37 @@ public sealed class PostgreSqlOrchestrationServiceSettings
     /// When null/empty, ApplicationName is left untouched and dt.current_task_hub() uses whatever
     /// application_name the connection carries, or 'default' if empty (or CURRENT_USER when TaskHubMode = '1').
     /// </summary>
-    public string? TaskHubName { get; init; }
+    public string? TaskHubName { get; set; }
 
     /// <summary>
     /// Schema name for DurableTask tables.
     /// Default: "dt"
     /// </summary>
-    public string SchemaName { get; init; } = "dt";
+    public string SchemaName { get; set; } = "dt";
 
     /// <summary>
     /// Maximum number of work items to fetch per poll.
     /// Default: 10
     /// </summary>
-    public int MaxConcurrentOrchestrations { get; init; } = 10;
+    public int MaxConcurrentOrchestrations { get; set; } = 10;
 
     /// <summary>
     /// Maximum number of activity tasks to fetch per poll.
     /// Default: 10
     /// </summary>
-    public int MaxConcurrentActivities { get; init; } = 10;
+    public int MaxConcurrentActivities { get; set; } = 10;
 
     /// <summary>
     /// Lock renewal interval (heartbeat).
     /// Default: 30 seconds
     /// </summary>
-    public TimeSpan LockRenewalInterval { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan LockRenewalInterval { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Lock timeout duration.
     /// Default: 5 minutes
     /// </summary>
-    public TimeSpan LockTimeout { get; init; } = TimeSpan.FromMinutes(5);
+    public TimeSpan LockTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// Upper bound for the work-item polling interval. When a dispatcher finds no work it
@@ -98,7 +102,7 @@ public sealed class PostgreSqlOrchestrationServiceSettings
     /// to the minimum immediately, so this does not add latency to a busy task hub.
     /// Default: 1 second
     /// </summary>
-    public TimeSpan WorkItemPollingInterval { get; init; } = TimeSpan.FromSeconds(1);
+    public TimeSpan WorkItemPollingInterval { get; set; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// Lower bound for the work-item polling interval — the delay after the first poll that
@@ -106,24 +110,24 @@ public sealed class PostgreSqlOrchestrationServiceSettings
     /// Must not be greater than <see cref="WorkItemPollingInterval"/>.
     /// Default: 50 milliseconds
     /// </summary>
-    public TimeSpan MinWorkItemPollingInterval { get; init; } = TimeSpan.FromMilliseconds(50);
+    public TimeSpan MinWorkItemPollingInterval { get; set; } = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
     /// Increment applied to each successive empty poll while backing off from
     /// <see cref="MinWorkItemPollingInterval"/> to <see cref="WorkItemPollingInterval"/>.
     /// Default: 50 milliseconds
     /// </summary>
-    public TimeSpan DeltaBackoffWorkItemPollingInterval { get; init; } = TimeSpan.FromMilliseconds(50);
+    public TimeSpan DeltaBackoffWorkItemPollingInterval { get; set; } = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
     /// Enable automatic schema deployment on startup.
     /// Default: false (manual deployment recommended)
     /// </summary>
-    public bool AutoDeploySchema { get; init; }
+    public bool AutoDeploySchema { get; set; }
 
     /// <summary>
     /// Worker identifier for lock ownership.
     /// Default: Machine name + Process ID
     /// </summary>
-    public string WorkerId { get; init; } = $"{Environment.MachineName}-{Environment.ProcessId}";
+    public string WorkerId { get; set; } = $"{Environment.MachineName}-{Environment.ProcessId}";
 }

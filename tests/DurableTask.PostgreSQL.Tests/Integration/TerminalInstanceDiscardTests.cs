@@ -87,15 +87,14 @@ public sealed class TerminalInstanceDiscardTests : IAsyncLifetime
         // Queue an event the completed instance can never consume. This mirrors the issue's
         // reproduction: a TimerFired still in flight when the orchestration completed.
         await _client.RaiseEventAsync(instance, "neverConsumed", "payload");
-        Assert.True(
-            await WaitForNewEventCountAsync(instanceId, expected: 1, TimeSpan.FromSeconds(10)),
-            "the raised event should have been queued in new_events");
 
-        // The worker polls continuously, so the discard happens on its own. Before the fix this
-        // never reached zero: the events stayed queued and the instance was re-locked forever.
+        // The event can be queued and discarded between two observations of the queue. Require
+        // evidence that this instance was actually discarded as well as an empty queue, rather
+        // than sampling its transient count of one (issue #16). Before the provider fix the
+        // events stayed queued and the instance was re-locked forever.
         Assert.True(
-            await WaitForNewEventCountAsync(instanceId, expected: 0, TimeSpan.FromSeconds(30)),
-            "the discard should have deleted the queued events for the terminal instance");
+            await WaitForDiscardAsync(instanceId, TimeSpan.FromSeconds(30)),
+            "the terminal instance should have logged a discard and its event queue should be empty");
 
         // The lock must be released too, otherwise the instance stays pinned to a dead worker.
         Assert.Null(await GetLockedByAsync(instanceId));
@@ -136,12 +135,12 @@ public sealed class TerminalInstanceDiscardTests : IAsyncLifetime
         Assert.Equal(0, Convert.ToInt32(await cmd.ExecuteScalarAsync()));
     }
 
-    private static async Task<bool> WaitForNewEventCountAsync(string instanceId, int expected, TimeSpan timeout)
+    private async Task<bool> WaitForDiscardAsync(string instanceId, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow.Add(timeout);
         while (DateTime.UtcNow < deadline)
         {
-            if (await GetNewEventCountAsync(instanceId) == expected)
+            if (await GetNewEventCountAsync(instanceId) == 0 && CountDiscardWarnings(instanceId) > 0)
             {
                 return true;
             }
@@ -149,7 +148,7 @@ public sealed class TerminalInstanceDiscardTests : IAsyncLifetime
             await Task.Delay(250);
         }
 
-        return await GetNewEventCountAsync(instanceId) == expected;
+        return await GetNewEventCountAsync(instanceId) == 0 && CountDiscardWarnings(instanceId) > 0;
     }
 
     private static async Task<int> GetNewEventCountAsync(string instanceId)
